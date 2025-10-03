@@ -1,10 +1,10 @@
-name: Build CVC5 and Test
+name: CVC5
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-and-test:
+  build:
     runs-on: ubuntu-latest
     
     steps:
@@ -21,6 +21,7 @@ jobs:
           git clone https://github.com/cvc5/cvc5.git cvc5
           cd cvc5
           ./configure.sh debug --auto-download
+          cd build
           make -j$(nproc)
           
       - name: Test binary
