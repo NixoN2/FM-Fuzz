@@ -1,0 +1,15 @@
+name: Build Z3
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        
+      - name: Build Z3
+        run: ./scripts/z3/build.sh
