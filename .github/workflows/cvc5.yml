@@ -28,4 +28,3 @@ jobs:
         run: |
           cd cvc5
           ./build/bin/cvc5 --version
-          ./build/bin/cvc5 --help
