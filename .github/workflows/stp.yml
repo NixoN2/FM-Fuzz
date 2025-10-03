@@ -1,0 +1,15 @@
+name: Build STP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        
+      - name: Build STP
+        run: ./scripts/stp/build.sh
