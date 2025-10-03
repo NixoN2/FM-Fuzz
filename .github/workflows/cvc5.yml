@@ -9,7 +9,7 @@ jobs:
     
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         
       - name: Install basic tools
         run: |
@@ -18,13 +18,13 @@ jobs:
           
       - name: Clone and build CVC5
         run: |
-          git clone https://github.com/cvc5/cvc5.git cvc5-src
-          cd cvc5-src
-          ./configure.sh debug
+          git clone https://github.com/cvc5/cvc5.git cvc5
+          cd cvc5
+          ./configure.sh debug --auto-download
           make -j$(nproc)
           
       - name: Test binary
         run: |
-          cd cvc5-src
+          cd cvc5
           ./build/bin/cvc5 --version
           ./build/bin/cvc5 --help
