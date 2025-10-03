@@ -1,4 +1,4 @@
-name: Build CVC5
+name: Build OpenSMT
 
 on:
   workflow_dispatch:
@@ -11,5 +11,5 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
         
-      - name: Build and test CVC5
-        run: ./scripts/cvc5/build.sh
+      - name: Build OpenSMT
+        run: ./scripts/opensmt/build.sh

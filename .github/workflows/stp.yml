@@ -1,4 +1,4 @@
-name: Build CVC5
+name: Build STP
 
 on:
   workflow_dispatch:
@@ -11,5 +11,5 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
         
-      - name: Build and test CVC5
-        run: ./scripts/cvc5/build.sh
+      - name: Build STP
+        run: ./scripts/stp/build.sh
