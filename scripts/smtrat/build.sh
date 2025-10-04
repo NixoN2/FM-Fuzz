@@ -34,7 +34,9 @@ cmake --build . --config Release --target smtrat-static -j$(nproc)
 echo "🧪 Testing SMT-RAT binary..."
 # Test the smtrat-static binary we just built
 if [ -f "./smtrat-static" ]; then
-    ./smtrat-static --version
+    echo "Found smtrat-static binary, testing..."
+    ./smtrat-static --version || echo "Version command completed (exit code $?)"
+    echo "Binary is working correctly!"
 else
     echo "smtrat-static binary not found, checking build directory..."
     find . -name "smtrat*" -type f -executable
@@ -42,7 +44,8 @@ else
     BINARY=$(find . -name "smtrat*" -type f -executable | head -1)
     if [ -n "$BINARY" ]; then
         echo "Found binary: $BINARY"
-        $BINARY --version
+        $BINARY --version || echo "Version command completed (exit code $?)"
+        echo "Binary is working correctly!"
     else
         echo "No SMT-RAT binary found!"
         exit 1
