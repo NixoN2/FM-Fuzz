@@ -14,6 +14,7 @@ sudo apt-get install -y \
   git \
   libboost-program-options-dev \
   ninja-build \
+  patchelf \
   python3 \
   python3-pip \
   python3-setuptools \
@@ -41,10 +42,24 @@ sudo cmake --install .
 
 echo "📦 Installing STP dependencies to system..."
 # Install the dependency libraries to /usr/local/lib
-sudo cp -f deps/install/lib/*.so* /usr/local/lib/ 2>/dev/null || true
-sudo cp -f deps/cadical/build/libcadical.so /usr/local/lib/ 2>/dev/null || true
-sudo cp -f deps/cadiback/libcadiback.so /usr/local/lib/ 2>/dev/null || true
-sudo cp -f build/lib/*.so* /usr/local/lib/ 2>/dev/null || true
+echo "Copying minisat libraries..."
+sudo cp -f deps/install/lib/*.so* /usr/local/lib/ 2>/dev/null || echo "No minisat libraries found in deps/install/lib/"
+echo "Copying cadical library..."
+sudo cp -f deps/cadical/build/libcadical.so /usr/local/lib/ 2>/dev/null || echo "libcadical.so not found in deps/cadical/build/"
+echo "Copying cadiback library..."
+sudo cp -f deps/cadiback/libcadiback.so /usr/local/lib/ 2>/dev/null || echo "libcadiback.so not found in deps/cadiback/"
+echo "Copying abc library..."
+sudo cp -f build/lib/*.so* /usr/local/lib/ 2>/dev/null || echo "No abc libraries found in build/lib/"
+echo "Copying cryptominisat library..."
+sudo cp -f deps/install/lib/libcryptominisat* /usr/local/lib/ 2>/dev/null || echo "No cryptominisat libraries found"
+
+echo "Verifying copied libraries..."
+ls -la /usr/local/lib/libmini* /usr/local/lib/libcadi* /usr/local/lib/libcrypto* /usr/local/lib/libabc* 2>/dev/null || echo "Some libraries still missing"
+
+echo "🔧 Fixing RPATH in STP binaries..."
+# Fix the RPATH in the STP binaries to use /usr/local/lib instead of build directories
+sudo patchelf --set-rpath '/usr/local/lib:/lib/x86_64-linux-gnu' /usr/local/bin/stp 2>/dev/null || echo "patchelf not available, trying alternative method"
+sudo patchelf --set-rpath '/usr/local/lib:/lib/x86_64-linux-gnu' /usr/local/bin/stp_simple 2>/dev/null || echo "patchelf not available for stp_simple"
 
 echo "🔧 Updating library cache..."
 sudo ldconfig
