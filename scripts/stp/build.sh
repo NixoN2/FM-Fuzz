@@ -41,6 +41,24 @@ echo "📦 Installing STP..."
 sudo cmake --install .
 
 echo "📦 Installing STP dependencies to system..."
+# First, let's explore the actual directory structure
+echo "Exploring directory structure..."
+echo "Current directory: $(pwd)"
+echo "Contents of deps/:"
+ls -la deps/ 2>/dev/null || echo "deps/ directory not found"
+echo "Contents of deps/install/:"
+ls -la deps/install/ 2>/dev/null || echo "deps/install/ directory not found"
+echo "Contents of deps/install/lib/:"
+ls -la deps/install/lib/ 2>/dev/null || echo "deps/install/lib/ directory not found"
+echo "Contents of deps/cadical/:"
+ls -la deps/cadical/ 2>/dev/null || echo "deps/cadical/ directory not found"
+echo "Contents of deps/cadical/build/:"
+ls -la deps/cadical/build/ 2>/dev/null || echo "deps/cadical/build/ directory not found"
+echo "Contents of deps/cadiback/:"
+ls -la deps/cadiback/ 2>/dev/null || echo "deps/cadiback/ directory not found"
+echo "Contents of build/lib/:"
+ls -la build/lib/ 2>/dev/null || echo "build/lib/ directory not found"
+
 # Install the dependency libraries to /usr/local/lib
 echo "Copying minisat libraries..."
 sudo cp -f deps/install/lib/*.so* /usr/local/lib/ 2>/dev/null || echo "No minisat libraries found in deps/install/lib/"
