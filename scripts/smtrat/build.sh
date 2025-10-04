@@ -28,24 +28,18 @@ cd build
 # Configure with release build type
 cmake -DCMAKE_BUILD_TYPE=Release ..
 
-# Build all targets (including smtrat-static)
-cmake --build . --config Release --target all -j$(nproc)
+# Build only smtrat-static target (faster build)
+cmake --build . --config Release --target smtrat-static -j$(nproc)
 
 # Install to system
 sudo cmake --install .
 
 echo "🧪 Testing SMT-RAT binary..."
-# Try different possible binary names
+# Test the smtrat-static binary we just built
 if [ -f "./smtrat-static" ]; then
     ./smtrat-static --version
-elif [ -f "./smtrat" ]; then
-    ./smtrat --version
-elif [ -f "../smtrat-static" ]; then
-    ../smtrat-static --version
-elif [ -f "../smtrat" ]; then
-    ../smtrat --version
 else
-    echo "Binary not found in expected locations, checking build directory..."
+    echo "smtrat-static binary not found, checking build directory..."
     find . -name "smtrat*" -type f -executable
     # Try to run the first executable found
     BINARY=$(find . -name "smtrat*" -type f -executable | head -1)
