@@ -36,9 +36,10 @@ cd build
 cmake -DNOCRYPTOMINISAT:BOOL=OFF -DENABLE_TESTING:BOOL=ON -DPYTHON_EXECUTABLE:PATH="$(which python3)" -G Ninja ..
 cmake --build . --parallel $(nproc)
 
+echo "📦 Installing STP..."
+sudo cmake --install .
+
 echo "🧪 Testing STP binary..."
-# Set library path to include the build directory
-export LD_LIBRARY_PATH="$PWD:$LD_LIBRARY_PATH"
-./stp --version
+stp --version
 
 echo "✅ STP build and test completed successfully!"
