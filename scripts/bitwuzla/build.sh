@@ -28,7 +28,8 @@ cd bitwuzla
 meson wrap install gtest
 ./configure.py --testing --unit-testing --python
 cd build
-ninja install
+ninja
+sudo ninja install
 
 echo "🧪 Testing Bitwuzla binary..."
 ./src/main/bitwuzla --version
