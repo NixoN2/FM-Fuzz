@@ -31,9 +31,6 @@ cmake -DCMAKE_BUILD_TYPE=Release ..
 # Build only smtrat-static target (faster build)
 cmake --build . --config Release --target smtrat-static -j$(nproc)
 
-# Install to system
-sudo cmake --install .
-
 echo "🧪 Testing SMT-RAT binary..."
 # Test the smtrat-static binary we just built
 if [ -f "./smtrat-static" ]; then
