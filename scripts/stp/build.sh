@@ -41,65 +41,23 @@ echo "📦 Installing STP..."
 sudo cmake --install .
 
 echo "📦 Installing STP dependencies to system..."
-# First, let's explore the actual directory structure
-echo "Exploring directory structure..."
-echo "Current directory: $(pwd)"
-echo "Contents of ../deps/:"
-ls -la ../deps/ 2>/dev/null || echo "../deps/ directory not found"
-echo "Contents of ../deps/install/:"
-ls -la ../deps/install/ 2>/dev/null || echo "../deps/install/ directory not found"
-echo "Contents of ../deps/install/lib/:"
-ls -la ../deps/install/lib/ 2>/dev/null || echo "../deps/install/lib/ directory not found"
-echo "Contents of ../deps/cadical/:"
-ls -la ../deps/cadical/ 2>/dev/null || echo "../deps/cadical/ directory not found"
-echo "Contents of ../deps/cadical/build/:"
-ls -la ../deps/cadical/build/ 2>/dev/null || echo "../deps/cadical/build/ directory not found"
-echo "Contents of ../deps/cadiback/:"
-ls -la ../deps/cadiback/ 2>/dev/null || echo "../deps/cadiback/ directory not found"
-echo "Contents of lib/:"
-ls -la lib/ 2>/dev/null || echo "lib/ directory not found"
-
-# Install the dependency libraries to /usr/local/lib
-echo "Copying minisat libraries..."
-sudo cp -f ../deps/install/lib/*.so* /usr/local/lib/ 2>/dev/null || echo "No minisat libraries found in ../deps/install/lib/"
-echo "Copying cadical library..."
-sudo cp -f ../deps/cadical/build/libcadical.so /usr/local/lib/ 2>/dev/null || echo "libcadical.so not found in ../deps/cadical/build/"
-echo "Copying cadiback library..."
-sudo cp -f ../deps/cadiback/libcadiback.so /usr/local/lib/ 2>/dev/null || echo "libcadiback.so not found in ../deps/cadiback/"
-echo "Copying abc library..."
-sudo cp -f lib/*.so* /usr/local/lib/ 2>/dev/null || echo "No abc libraries found in lib/"
-echo "Copying cryptominisat library..."
-sudo cp -f ../deps/install/lib/libcryptominisat* /usr/local/lib/ 2>/dev/null || echo "No cryptominisat libraries found"
-
-echo "Verifying copied libraries..."
-ls -la /usr/local/lib/libmini* /usr/local/lib/libcadi* /usr/local/lib/libcrypto* /usr/local/lib/libabc* 2>/dev/null || echo "Some libraries still missing"
+# Copy all dependency libraries to /usr/local/lib
+sudo cp -f ../deps/install/lib/*.so* /usr/local/lib/ 2>/dev/null || true
+sudo cp -f ../deps/cadical/build/libcadical.so /usr/local/lib/ 2>/dev/null || true
+sudo cp -f ../deps/cadiback/libcadiback.so /usr/local/lib/ 2>/dev/null || true
+sudo cp -f lib/*.so* /usr/local/lib/ 2>/dev/null || true
 
 echo "🔧 Fixing RPATH in STP binaries..."
 # Fix the RPATH in the STP binaries to use /usr/local/lib instead of build directories
-sudo patchelf --set-rpath '/usr/local/lib:/lib/x86_64-linux-gnu' /usr/local/bin/stp 2>/dev/null || echo "patchelf not available, trying alternative method"
-sudo patchelf --set-rpath '/usr/local/lib:/lib/x86_64-linux-gnu' /usr/local/bin/stp_simple 2>/dev/null || echo "patchelf not available for stp_simple"
+sudo patchelf --set-rpath '/usr/local/lib:/lib/x86_64-linux-gnu' /usr/local/bin/stp 2>/dev/null || true
+sudo patchelf --set-rpath '/usr/local/lib:/lib/x86_64-linux-gnu' /usr/local/bin/stp_simple 2>/dev/null || true
 
 echo "🔧 Updating library cache..."
 sudo ldconfig
 
-echo "🔍 Debugging information..."
-echo "Current LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
-echo "Checking for STP libraries in /usr/local/lib:"
-ls -la /usr/local/lib/libstp* /usr/local/lib/libcadi* /usr/local/lib/libmini* /usr/local/lib/libcrypto* /usr/local/lib/libabc* 2>/dev/null || echo "Some STP libraries not found in /usr/local/lib"
-echo "Checking for STP binaries:"
-ls -la /usr/local/bin/stp* 2>/dev/null || echo "STP binaries not found in /usr/local/bin"
-echo "Library dependencies for stp binary:"
-ldd /usr/local/bin/stp 2>/dev/null || echo "Could not check dependencies for stp binary"
-echo "Checking for missing libraries:"
-echo "Looking for libcadiback.so:"
-find /usr/local/lib -name "*cadiback*" 2>/dev/null || echo "libcadiback.so not found"
-echo "Looking for libcadical.so:"
-find /usr/local/lib -name "*cadical*" 2>/dev/null || echo "libcadical.so not found"
-
 echo "🧪 Testing STP binary..."
 # Set LD_LIBRARY_PATH to ensure shared libraries are found
 export LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"
-echo "Updated LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
 stp --version
 
 echo "✅ STP build and test completed successfully!"
