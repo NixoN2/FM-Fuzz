@@ -15,7 +15,7 @@ sudo apt-get install -y \
   libeigen3-dev \
   libreadline-dev \
   libgtest-dev \
-  clang-12
+  clang
 
 echo "📥 Cloning SMT-RAT repository..."
 git clone https://github.com/ths-rwth/smtrat.git smtrat
