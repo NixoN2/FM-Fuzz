@@ -28,6 +28,9 @@ wget https://github.com/Z3Prover/z3/releases/download/z3-4.11.2/z3-4.11.2-x64-gl
 unzip z3-4.11.2-x64-glibc-2.31.zip
 sudo cp z3-4.11.2-x64-glibc-2.31/bin/libz3.a /usr/lib/
 sudo cp -r z3-4.11.2-x64-glibc-2.31/include/* /usr/include/
+# Also copy the shared library for proper linking
+sudo cp z3-4.11.2-x64-glibc-2.31/bin/libz3.so /usr/lib/
+sudo ldconfig
 
 echo "🔧 Setting up CUDD dependency..."
 git clone -b 3val https://github.com/martinjonas/cudd.git
@@ -48,6 +51,9 @@ ls -la parser/ 2>/dev/null || echo "No parser directory found"
 ls -la parser/smtlibv2-grammar/ 2>/dev/null || echo "No smtlibv2-grammar directory found"
 
 echo "🔨 Building Q3B..."
+# Set environment variables for proper linking
+export LD_LIBRARY_PATH="/usr/lib:$LD_LIBRARY_PATH"
+export PKG_CONFIG_PATH="/usr/lib/pkgconfig:$PKG_CONFIG_PATH"
 cmake -B build -DANTLR_EXECUTABLE=/usr/share/java/antlr-4.11.1-complete.jar
 cmake --build build -j4
 
