@@ -20,7 +20,7 @@ sudo apt-get install -y \
   uuid-dev
 
 echo "📥 Cloning Q3B repository..."
-git clone https://github.com/martinjonas/Q3B.git q3b
+git clone --recurse-submodules https://github.com/martinjonas/Q3B.git q3b
 
 echo "🔧 Setting up Z3 dependency..."
 cd q3b
@@ -40,6 +40,12 @@ cd ..
 echo "🔧 Setting up ANTLR..."
 sudo mkdir -p /usr/share/java
 wget https://www.antlr.org/download/antlr-4.11.1-complete.jar -P /usr/share/java
+
+echo "🔍 Checking for grammar files..."
+find . -name "*.g4" -type f
+echo "Checking parser directory structure..."
+ls -la parser/ 2>/dev/null || echo "No parser directory found"
+ls -la parser/smtlibv2-grammar/ 2>/dev/null || echo "No smtlibv2-grammar directory found"
 
 echo "🔨 Building Q3B..."
 cmake -B build -DANTLR_EXECUTABLE=/usr/share/java/antlr-4.11.1-complete.jar
