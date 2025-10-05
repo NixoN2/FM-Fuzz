@@ -8,7 +8,6 @@ echo "🔧 Installing basic tools..."
 sudo apt-get update
 sudo apt-get install -y \
   build-essential \
-  cmake \
   git \
   libgmp-dev \
   meson \
@@ -19,11 +18,18 @@ sudo apt-get install -y \
 echo "📥 Cloning Bitwuzla repository..."
 git clone https://github.com/bitwuzla/bitwuzla.git bitwuzla
 
+echo "🔧 Setting up Python environment..."
+python3 -m venv ~/.venv
+source ~/.venv/bin/activate
+python3 -m pip install meson pytest cython>=3.*
+
 echo "🔨 Building Bitwuzla..."
 cd bitwuzla
-./configure.py
+meson wrap install gtest
+./configure.py --testing --unit-testing --python
 cd build
 ninja
+sudo ninja install
 
 echo "🧪 Testing Bitwuzla binary..."
 ./src/main/bitwuzla --version
