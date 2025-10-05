@@ -22,23 +22,10 @@ sudo apt-get install -y \
 echo "📥 Cloning Q3B repository..."
 git clone --recurse-submodules https://github.com/martinjonas/Q3B.git q3b
 
-echo "🔧 Setting up Z3 dependency..."
+echo "🔧 Setting up Q3B dependencies using official script..."
 cd q3b
-wget https://github.com/Z3Prover/z3/releases/download/z3-4.11.2/z3-4.11.2-x64-glibc-2.31.zip
-unzip z3-4.11.2-x64-glibc-2.31.zip
-sudo cp z3-4.11.2-x64-glibc-2.31/bin/libz3.a /usr/lib/
-sudo cp -r z3-4.11.2-x64-glibc-2.31/include/* /usr/include/
-# Also copy the shared library for proper linking
-sudo cp z3-4.11.2-x64-glibc-2.31/bin/libz3.so /usr/lib/
-sudo ldconfig
-
-echo "🔧 Setting up CUDD dependency..."
-git clone -b 3val https://github.com/martinjonas/cudd.git
-cd cudd
-./configure --enable-silent-rules --enable-obj --enable-shared
-make -j4
-sudo make install
-cd ..
+# Use the official dependency script as recommended in documentation
+bash contrib/get_deps.sh
 
 echo "🔧 Setting up ANTLR..."
 sudo mkdir -p /usr/share/java
