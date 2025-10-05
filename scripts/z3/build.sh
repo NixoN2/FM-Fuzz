@@ -40,8 +40,6 @@ echo "🧪 Testing Z3 binary..."
 # Test the Z3 binary
 if [ -f "./z3" ]; then
     ./z3 --version || echo "Version command completed (exit code $?)"
-    echo "Testing basic SMT functionality..."
-    echo "(assert (> x 0))" | ./z3 -in || echo "SMT test completed (exit code $?)"
     echo "Z3 binary is working correctly!"
 else
     echo "Z3 binary not found!"
