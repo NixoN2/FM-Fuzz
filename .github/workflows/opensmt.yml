@@ -13,19 +13,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
       
+      - name: Restore solver state cache
+        uses: actions/cache@v4
+        id: cache-restore
+        with:
+          path: .cache
+          key: solver-opensmt-latest
+          restore-keys: |
+            solver-opensmt-
+      
       - name: Check for upstream changes
         id: check-upstream
         run: |
           ./scripts/check-upstream.sh opensmt https://github.com/usi-verification-and-security/OpenSMT.git
           echo "build_needed=$(cat .build_status | grep build_needed | cut -d'=' -f2)" >> $GITHUB_OUTPUT
+          echo "sha=$(cat .build_status | grep sha | cut -d'=' -f2)" >> $GITHUB_OUTPUT
       
-      - name: Cache solver state
+      - name: Save solver state cache
+        if: steps.check-upstream.outputs.build_needed == 'true'
         uses: actions/cache@v4
         with:
           path: .cache
-          key: solver-opensmt-${{ steps.check-upstream.outputs.build_needed }}
-          restore-keys: |
-            solver-opensmt-
+          key: solver-opensmt-${{ steps.check-upstream.outputs.sha }}
       
       - name: Build OpenSMT
         if: steps.check-upstream.outputs.build_needed == 'true'
