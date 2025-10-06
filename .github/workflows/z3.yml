@@ -2,14 +2,35 @@ name: Build Z3
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *'  # Run every hour
 
 jobs:
-  build-and-test:
+  check-and-build:
     runs-on: ubuntu-latest
     
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-        
+      
+      - name: Check for upstream changes
+        id: check-upstream
+        run: |
+          ./scripts/check-upstream.sh z3 https://github.com/Z3Prover/z3.git
+          echo "build_needed=$(cat .build_status | grep build_needed | cut -d'=' -f2)" >> $GITHUB_OUTPUT
+      
+      - name: Cache solver state
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: solver-z3-${{ steps.check-upstream.outputs.build_needed }}
+          restore-keys: |
+            solver-z3-
+      
       - name: Build Z3
+        if: steps.check-upstream.outputs.build_needed == 'true'
         run: ./scripts/z3/build.sh
+      
+      - name: Skip build (up to date)
+        if: steps.check-upstream.outputs.build_needed == 'false'
+        run: echo "✅ Z3 is up to date - skipping build"
