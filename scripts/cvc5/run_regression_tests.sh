@@ -37,8 +37,8 @@ fi
 echo "🧪 Running CVC5 regression test suite: $SUITE_NAME"
 echo "=========================================="
 
-# Run the test suite with parallel execution (4 cores)
-if ctest -L "$SUITE_NAME" -j$(nproc) --output-on-failure; then
+# Run the test suite with parallel execution and timeout
+if ctest -L "$SUITE_NAME" -j$(nproc) --timeout 3600 --output-on-failure; then
     echo "✅ $SUITE_NAME tests completed successfully"
     exit 0
 else
