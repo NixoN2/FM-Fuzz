@@ -4,41 +4,17 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-cvc5:
+
+  regress0:
     runs-on: ubuntu-latest
-    outputs:
-      build-success: ${{ steps.build.outcome }}
     
     steps:
       - name: Checkout
         uses: actions/checkout@v5
       
       - name: Build CVC5 with coverage
-        id: build
         run: |
           ./scripts/cvc5/build.sh --coverage
-      
-      - name: Upload CVC5 build
-        uses: actions/upload-artifact@v4
-        with:
-          name: cvc5-build
-          path: cvc5/
-          retention-days: 1
-
-  regress0:
-    needs: build-cvc5
-    runs-on: ubuntu-latest
-    if: needs.build-cvc5.outputs.build-success == 'success'
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      
-      - name: Download CVC5 build
-        uses: actions/download-artifact@v4
-        with:
-          name: cvc5-build
-          path: ./
       
       - name: Run regress0 tests with timing
         run: |
@@ -46,19 +22,15 @@ jobs:
           ../../scripts/measure_time.sh ../../scripts/cvc5/run_regression_tests.sh regress0
 
   regress1:
-    needs: build-cvc5
     runs-on: ubuntu-latest
-    if: needs.build-cvc5.outputs.build-success == 'success'
     
     steps:
       - name: Checkout
         uses: actions/checkout@v5
       
-      - name: Download CVC5 build
-        uses: actions/download-artifact@v4
-        with:
-          name: cvc5-build
-          path: ./
+      - name: Build CVC5 with coverage
+        run: |
+          ./scripts/cvc5/build.sh --coverage
       
       - name: Run regress1 tests with timing
         run: |
@@ -66,19 +38,15 @@ jobs:
           ../../scripts/measure_time.sh ../../scripts/cvc5/run_regression_tests.sh regress1
 
   regress2:
-    needs: build-cvc5
     runs-on: ubuntu-latest
-    if: needs.build-cvc5.outputs.build-success == 'success'
     
     steps:
       - name: Checkout
         uses: actions/checkout@v5
       
-      - name: Download CVC5 build
-        uses: actions/download-artifact@v4
-        with:
-          name: cvc5-build
-          path: ./
+      - name: Build CVC5 with coverage
+        run: |
+          ./scripts/cvc5/build.sh --coverage
       
       - name: Run regress2 tests with timing
         run: |
@@ -86,19 +54,15 @@ jobs:
           ../../scripts/measure_time.sh ../../scripts/cvc5/run_regression_tests.sh regress2
 
   regress3:
-    needs: build-cvc5
     runs-on: ubuntu-latest
-    if: needs.build-cvc5.outputs.build-success == 'success'
     
     steps:
       - name: Checkout
         uses: actions/checkout@v5
       
-      - name: Download CVC5 build
-        uses: actions/download-artifact@v4
-        with:
-          name: cvc5-build
-          path: ./
+      - name: Build CVC5 with coverage
+        run: |
+          ./scripts/cvc5/build.sh --coverage
       
       - name: Run regress3 tests with timing
         run: |
@@ -106,19 +70,15 @@ jobs:
           ../../scripts/measure_time.sh ../../scripts/cvc5/run_regression_tests.sh regress3
 
   regress4:
-    needs: build-cvc5
     runs-on: ubuntu-latest
-    if: needs.build-cvc5.outputs.build-success == 'success'
     
     steps:
       - name: Checkout
         uses: actions/checkout@v5
       
-      - name: Download CVC5 build
-        uses: actions/download-artifact@v4
-        with:
-          name: cvc5-build
-          path: ./
+      - name: Build CVC5 with coverage
+        run: |
+          ./scripts/cvc5/build.sh --coverage
       
       - name: Run regress4 tests with timing
         run: |
