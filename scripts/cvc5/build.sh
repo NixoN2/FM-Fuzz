@@ -31,7 +31,7 @@ sudo apt-get install -y \
 # Install coverage tools if coverage is enabled
 if [[ "$ENABLE_COVERAGE" == "true" ]]; then
     echo "📊 Installing coverage tools..."
-    sudo apt-get install -y lcov gcov
+    sudo apt-get install -y lcov gcc
 fi
 
 echo "📥 Cloning CVC5 repository..."

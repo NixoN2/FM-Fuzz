@@ -46,9 +46,9 @@ jobs:
           ../../scripts/measure_time.sh ../../scripts/cvc5/run_regression_tests.sh regress0
 
   regress1:
-    needs: regress0
+    needs: build-cvc5
     runs-on: ubuntu-latest
-    if: always() && needs.regress0.result != 'cancelled'
+    if: needs.build-cvc5.outputs.build-success == 'success'
     
     steps:
       - name: Checkout
@@ -66,9 +66,9 @@ jobs:
           ../../scripts/measure_time.sh ../../scripts/cvc5/run_regression_tests.sh regress1
 
   regress2:
-    needs: regress1
+    needs: build-cvc5
     runs-on: ubuntu-latest
-    if: always() && needs.regress1.result != 'cancelled'
+    if: needs.build-cvc5.outputs.build-success == 'success'
     
     steps:
       - name: Checkout
@@ -86,9 +86,9 @@ jobs:
           ../../scripts/measure_time.sh ../../scripts/cvc5/run_regression_tests.sh regress2
 
   regress3:
-    needs: regress2
+    needs: build-cvc5
     runs-on: ubuntu-latest
-    if: always() && needs.regress2.result != 'cancelled'
+    if: needs.build-cvc5.outputs.build-success == 'success'
     
     steps:
       - name: Checkout
@@ -106,9 +106,9 @@ jobs:
           ../../scripts/measure_time.sh ../../scripts/cvc5/run_regression_tests.sh regress3
 
   regress4:
-    needs: regress3
+    needs: build-cvc5
     runs-on: ubuntu-latest
-    if: always() && needs.regress3.result != 'cancelled'
+    if: needs.build-cvc5.outputs.build-success == 'success'
     
     steps:
       - name: Checkout
