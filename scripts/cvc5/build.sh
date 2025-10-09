@@ -32,6 +32,8 @@ sudo apt-get install -y \
 if [[ "$ENABLE_COVERAGE" == "true" ]]; then
     echo "📊 Installing coverage tools..."
     sudo apt-get install -y lcov gcc
+    # Install fastcov for faster coverage analysis
+    pip3 install fastcov
 fi
 
 echo "📥 Cloning CVC5 repository..."
