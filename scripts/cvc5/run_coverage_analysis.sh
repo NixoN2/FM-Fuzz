@@ -8,6 +8,9 @@ END_INDEX=$2
 
 echo "Running coverage analysis for tests ${START_INDEX}-${END_INDEX}"
 
+# Set test timeout environment variable
+export TEST_TIMEOUT=10800
+
 # Change to build directory
 cd cvc5/build
 

@@ -84,8 +84,8 @@ class CoverageMapper:
         # Measure test execution time
         start_time = time.time()
         
-        # Run the test using ctest
-        result = subprocess.run(["ctest", "-I", f"{test_id},{test_id}", "--output-on-failure"], 
+        # Run the test using ctest with parallel execution
+        result = subprocess.run(["ctest", "-I", f"{test_id},{test_id}", "-j4", "--output-on-failure"], 
                           cwd=self.build_dir, capture_output=True, text=True, check=False)
         
         end_time = time.time()
