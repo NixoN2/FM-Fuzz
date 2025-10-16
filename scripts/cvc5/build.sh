@@ -32,8 +32,8 @@ sudo apt-get install -y \
 if [[ "$ENABLE_COVERAGE" == "true" ]]; then
     echo "📊 Installing coverage tools..."
     sudo apt-get install -y lcov gcc
-    # Install fastcov for coverage analysis
-    pip3 install fastcov
+    # Install fastcov and psutil for coverage analysis
+    pip3 install fastcov psutil
     
     # Set environment variables for coverage collection
     export GCOV_PREFIX=$(pwd)/cvc5/build

@@ -11,6 +11,8 @@ import subprocess
 import re
 import argparse
 import time
+import gc
+import psutil
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -21,6 +23,9 @@ class CoverageMapper:
         self.test_regex = re.compile(r'Test\s+#(\d+):\s*(.+)')
         # Cache for demangled names to avoid repeated subprocess calls
         self.demangle_cache = {}
+        # Memory monitoring
+        self.max_memory_mb = 10000  # 10GB limit
+        self.memory_check_interval = 50  # Check every 50 tests
 
     def demangle_function_name(self, mangled_name: str) -> str:
         """Demangle C++ function names using c++filt with caching"""
@@ -47,6 +52,36 @@ class CoverageMapper:
         # Fallback: return the original path
         return file_path
 
+    def get_memory_usage_mb(self) -> float:
+        """Get current memory usage in MB"""
+        try:
+            process = psutil.Process()
+            return process.memory_info().rss / 1024 / 1024
+        except:
+            return 0.0
+
+    def check_memory_limit(self) -> bool:
+        """Check if memory usage is within limits"""
+        memory_mb = self.get_memory_usage_mb()
+        if memory_mb > self.max_memory_mb:
+            print(f"⚠️ Memory limit exceeded: {memory_mb:.1f}MB > {self.max_memory_mb}MB")
+            return False
+        return True
+
+    def cleanup_memory(self):
+        """Force garbage collection and clear caches"""
+        # Clear demangle cache periodically
+        if len(self.demangle_cache) > 1000:
+            self.demangle_cache.clear()
+        
+        # Force garbage collection
+        gc.collect()
+
+    def write_intermediate_mapping(self, function_to_tests: Dict, output_file: Path):
+        """Write intermediate mapping to disk to save memory"""
+        with open(output_file, 'w') as f:
+            json.dump(function_to_tests, f, separators=(',', ':'))
+
     def get_ctest_tests(self) -> List[Tuple[int, str]]:
         """Get list of tests from ctest --show-only"""
         try:
@@ -55,6 +90,7 @@ class CoverageMapper:
             
             if result.returncode != 0:
                 print(f"Error running ctest --show-only: {result.stderr}")
+                sys.stdout.flush()
                 return []
             
             tests = []
@@ -64,10 +100,12 @@ class CoverageMapper:
                     tests.append((int(match.group(1)), match.group(2)))
             
             print(f"Found {len(tests)} tests")
+            sys.stdout.flush()
             return tests
             
         except Exception as e:
             print(f"Error getting ctest tests: {e}")
+            sys.stdout.flush()
             return []
 
     def process_single_test(self, test_info: Tuple[int, str]) -> Optional[Dict]:
@@ -102,6 +140,10 @@ class CoverageMapper:
             print(f"✅ {test_name} - {len(coverage_data['functions'])} functions - {execution_time}s")
         else:
             print(f"❌ {test_name} - {execution_time}s")
+        sys.stdout.flush()
+        
+        # Clean up memory after each test
+        self.cleanup_memory()
         
         return coverage_data
 
@@ -119,7 +161,15 @@ class CoverageMapper:
         if result.returncode != 0:
             return None
         
-        return self.parse_fastcov_json(fastcov_output, test_name)
+        result_data = self.parse_fastcov_json(fastcov_output, test_name)
+        
+        # Clean up temporary fastcov file to save disk space
+        try:
+            fastcov_output.unlink()
+        except:
+            pass
+        
+        return result_data
 
     def parse_fastcov_json(self, fastcov_file: Path, test_name: str) -> Optional[Dict]:
         """Parse fastcov JSON file to extract function information"""
@@ -172,48 +222,68 @@ class CoverageMapper:
             "--exclude", "/usr/include/*", "--exclude", "*/deps/*"
         ], cwd=self.build_dir.parent, capture_output=True, text=True, check=False)
 
-    def process_tests(self, tests: List[Tuple[int, str]], max_tests: int = None) -> List[Dict]:
-        """Process tests sequentially with optimizations"""
+    def process_tests(self, tests: List[Tuple[int, str]], max_tests: int = None) -> str:
+        """Process tests sequentially with streaming to disk to avoid memory issues"""
         if max_tests:
             tests = tests[:max_tests]
         
         print(f"🚀 Processing {len(tests)} tests")
+        print(f"💾 Memory limit: {self.max_memory_mb}MB")
+        sys.stdout.flush()
         
-        results = []
+        # Use streaming approach - write to disk incrementally
+        temp_file = self.build_dir / "coverage_temp.json"
+        function_to_tests = {}
+        
         for i, test_info in enumerate(tests, 1):
             test_id, test_name = test_info
             print(f"Test {i}/{len(tests)} (ctest #{test_id}): {test_name}")
+            sys.stdout.flush()
+            
+            # Check memory every N tests
+            if i % self.memory_check_interval == 0:
+                if not self.check_memory_limit():
+                    print(f"🛑 Stopping at test {i} due to memory limit")
+                    sys.stdout.flush()
+                    break
+                self.cleanup_memory()
+                memory_mb = self.get_memory_usage_mb()
+                print(f"💾 Memory usage: {memory_mb:.1f}MB")
+                sys.stdout.flush()
             
             result = self.process_single_test(test_info)
             if result:
-                results.append(result)
+                # Add to mapping immediately and don't keep in memory
+                test_name = result["test_name"]
+                for func in result["functions"]:
+                    if func not in function_to_tests:
+                        function_to_tests[func] = []
+                    function_to_tests[func].append(test_name)
+                
+                # Write intermediate results every 100 tests to avoid losing progress
+                if i % 100 == 0:
+                    self.write_intermediate_mapping(function_to_tests, temp_file)
         
-        return results
+        # Write final mapping
+        self.write_intermediate_mapping(function_to_tests, temp_file)
+        return str(temp_file)
 
-    def generate_coverage_mapping(self, results: List[Dict]) -> Dict:
-        """Generate the final coverage mapping from test results"""
-        print("📊 Generating coverage mapping...")
-        
-        function_to_tests = {}
-        for result in results:
-            test_name = result["test_name"]
-            for func in result["functions"]:
-                function_to_tests.setdefault(func, []).append(test_name)
-        
-        return function_to_tests
 
     def run(self, max_tests: int = None, test_pattern: str = None, start_index: int = None, end_index: int = None):
         """Main execution method"""
         print("🔍 Discovering tests...")
+        sys.stdout.flush()
         tests = self.get_ctest_tests()
         
         if not tests:
             print("❌ No tests found")
+            sys.stdout.flush()
             return
         
         if test_pattern:
             tests = [t for t in tests if test_pattern in t[1]]
             print(f"🔍 Filtered to {len(tests)} tests matching pattern: {test_pattern}")
+            sys.stdout.flush()
         
         # Handle test range selection (1-based indexing to match ctest)
         if start_index is not None and end_index is not None:
@@ -222,30 +292,32 @@ class CoverageMapper:
             end_idx = min(len(tests), end_index)
             tests = tests[start_idx:end_idx]
             print(f"🔍 Selected tests {start_index}-{end_index}: {len(tests)} tests")
+            sys.stdout.flush()
         elif max_tests:
             tests = tests[:max_tests]
             print(f"🔍 Limited to {len(tests)} tests")
+            sys.stdout.flush()
         
-        # Process tests
-        results = self.process_tests(tests, max_tests)
+        # Process tests with streaming to avoid memory issues
+        temp_file = self.process_tests(tests, max_tests)
         
-        if not results:
+        if not temp_file or not Path(temp_file).exists():
             print("❌ No coverage data generated")
+            sys.stdout.flush()
             return
         
-        print(f"✅ Successfully processed {len(results)}/{len(tests)} tests")
-        
-        # Generate final mapping
-        coverage_mapping = self.generate_coverage_mapping(results)
-        
-        # Save to file (optimized for size)
+        # Move temp file to final location
         output_file = f"coverage_mapping_{start_index}_{end_index}.json" if start_index is not None else "coverage_mapping.json"
-        with open(output_file, 'w') as f:
-            json.dump(coverage_mapping, f, separators=(',', ':'))
+        Path(temp_file).rename(output_file)
+        
+        # Get stats from the final file
+        with open(output_file, 'r') as f:
+            coverage_mapping = json.load(f)
         
         print(f"📄 Coverage mapping saved to {output_file}")
         print(f"📊 Total functions: {len(coverage_mapping)}")
-        print(f"📊 Total tests: {len(results)}")
+        print(f"📊 Total tests: {len(tests)}")
+        sys.stdout.flush()
 
 def main():
     parser = argparse.ArgumentParser(description='Coverage Mapper for cvc5')
