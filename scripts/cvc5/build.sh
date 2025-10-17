@@ -31,16 +31,18 @@ sudo apt-get install -y \
 # Install coverage tools if coverage is enabled
 if [[ "$ENABLE_COVERAGE" == "true" ]]; then
     echo "📊 Installing coverage tools..."
-    sudo apt-get install -y lcov gcc gcov
-    # Install fastcov for coverage analysis
-    pip3 install fastcov
+    sudo apt-get install -y lcov gcc
+    # Install fastcov and psutil for coverage analysis
+    pip3 install fastcov psutil
     
     # Set environment variables for coverage collection
     export GCOV_PREFIX=$(pwd)/cvc5/build
     export GCOV_PREFIX_STRIP=0
+    export TEST_TIMEOUT=10800
     echo "🔧 Set coverage environment variables:"
     echo "  GCOV_PREFIX=$GCOV_PREFIX"
     echo "  GCOV_PREFIX_STRIP=$GCOV_PREFIX_STRIP"
+    echo "  TEST_TIMEOUT=$TEST_TIMEOUT"
 fi
 
 echo "📥 Cloning CVC5 repository..."
