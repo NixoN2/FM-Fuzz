@@ -10,6 +10,11 @@ COMMITS_TO_ANALYZE=${1:-10}
 ARTIFACT_NAME="coverage-mapping-final"
 COVERAGE_FILE="coverage_mapping_merged.json"
 
+# If we're in cvc5 directory, look for coverage file in parent directory
+if [ -f "../coverage_mapping_merged.json" ]; then
+    COVERAGE_FILE="../coverage_mapping_merged.json"
+fi
+
 echo "=========================================="
 echo "CVC5 Commit Coverage Analysis"
 echo "=========================================="

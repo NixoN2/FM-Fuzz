@@ -37,4 +37,5 @@ jobs:
       
       - name: Run commit coverage analysis
         run: |
-          ./scripts/cvc5/run_commit_coverage_analysis.sh 10
+          cd cvc5
+          ../scripts/cvc5/run_commit_coverage_analysis.sh 10
