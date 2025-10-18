@@ -90,7 +90,58 @@ class CommitCoverageAnalyzer:
         
         try:
             index = clang.cindex.Index.create()
-            args = ['-std=c++17', '-I/usr/include', '-I./src', '-I./include', '-DNDEBUG']
+            
+            # Comprehensive flags based on CVC5's actual build configuration
+            args = [
+                # C++ standard
+                '-std=c++17',
+                
+                # Include paths (critical for CVC5)
+                '-I./include',                    # Public headers
+                '-I./build/include',              # Generated headers
+                '-I./src/include',                # Internal headers
+                '-I./src/.',                      # Source directory
+                '-I./build/src',                  # Build source directory
+                '-isystem', './build/deps/include',  # Dependencies
+                
+                # System include paths for Linux
+                '-I/usr/include',
+                '-I/usr/include/c++/11',
+                '-I/usr/include/x86_64-linux-gnu/c++/11',
+                '-I/usr/include/c++/11/x86_64-linux-gnu',
+                '-I/usr/local/include',
+                
+                # CVC5-specific preprocessor definitions
+                '-DCVC5_ASSERTIONS',
+                '-DCVC5_DEBUG', 
+                '-DCVC5_STATISTICS_ON',
+                '-DCVC5_TRACING',
+                '-DCVC5_USE_POLY',
+                '-D__BUILDING_CVC5LIB',
+                '-Dcvc5_obj_EXPORTS',
+                
+                # Compiler flags used by CVC5
+                '-Wall',
+                '-Wsuggest-override',
+                '-Wnon-virtual-dtor', 
+                '-Wimplicit-fallthrough',
+                '-Wshadow',
+                '-fno-operator-names',
+                '-fno-extern-tls-init',
+                '-Wno-class-memaccess',
+                '-Wno-deprecated-declarations',
+                '-Wno-error=deprecated-declarations',
+                '-fPIC',
+                '-fvisibility=default',
+                
+                # Additional flags for better parsing
+                '-fparse-all-comments',
+                '-Wno-unknown-pragmas',
+                '-Wno-unused-parameter',
+                '-Wno-unused-variable',
+                '-Wno-unused-function'
+            ]
+            
             tu = index.parse(file_path, args=args)
             
             functions = []
@@ -113,7 +164,7 @@ class CommitCoverageAnalyzer:
             return functions
             
         except Exception as e:
-            print(f"Error parsing {file_path} with clang: {e}")
+            print(f"Warning: Could not parse {file_path} with clang: {e}")
             return []
     
     def get_function_signature(self, cursor) -> Optional[str]:
