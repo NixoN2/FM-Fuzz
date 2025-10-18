@@ -7,13 +7,9 @@ set -e
 
 # Default values
 COMMITS_TO_ANALYZE=${1:-10}
+PYTHON_SCRIPT=${2:-"$(dirname "$0")/commit_coverage_analyzer.py"}
+COVERAGE_FILE=${3:-"coverage_mapping_merged.json"}
 ARTIFACT_NAME="coverage-mapping-final"
-COVERAGE_FILE="coverage_mapping_merged.json"
-
-# If we're in cvc5 directory, look for coverage file in parent directory
-if [ -f "../coverage_mapping_merged.json" ]; then
-    COVERAGE_FILE="../coverage_mapping_merged.json"
-fi
 
 echo "=========================================="
 echo "CVC5 Commit Coverage Analysis"
@@ -68,7 +64,7 @@ for commit in $COMMITS; do
     echo ""
     
     # Run the coverage analysis (no output file, just console output)
-    python3 scripts/cvc5/commit_coverage_analyzer.py $commit --coverage-json $COVERAGE_FILE
+    python3 "$PYTHON_SCRIPT" $commit --coverage-json $COVERAGE_FILE
     
     echo ""
     echo "----------------------------------------"
