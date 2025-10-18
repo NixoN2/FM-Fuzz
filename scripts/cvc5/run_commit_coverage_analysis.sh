@@ -32,7 +32,7 @@ fi
 
 # Get the last N commits from the current branch
 echo "Getting last $COMMITS_TO_ANALYZE commits..."
-COMMITS=$(git log --oneline -n $COMMITS_TO_ANALYZE --format="%H")
+COMMITS=$(git log -n $COMMITS_TO_ANALYZE --format="%H")
 
 if [ -z "$COMMITS" ]; then
     echo "No commits found"
