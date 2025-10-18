@@ -6,6 +6,9 @@ on:
 jobs:
   commit-coverage-analysis:
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     
     steps:
       - name: Checkout
@@ -15,11 +18,14 @@ jobs:
         run: |
           ./scripts/cvc5/build.sh --coverage
       
-      - name: Download coverage mapping artifact
-        uses: actions/download-artifact@v4
+      - name: Download coverage mapping artifact from latest successful run
+        uses: dawidd6/action-download-artifact@v3
         with:
           name: coverage-mapping-final
           path: .
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: cvc5-coverage-analysis.yml
+          branch: main
       
       - name: Extract coverage mapping
         run: |
