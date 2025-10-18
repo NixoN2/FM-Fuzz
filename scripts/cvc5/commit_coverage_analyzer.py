@@ -90,7 +90,59 @@ class CommitCoverageAnalyzer:
         
         try:
             index = clang.cindex.Index.create()
-            args = ['-std=c++17', '-I/usr/include', '-I./src', '-I./include', '-DNDEBUG']
+            
+            # Comprehensive flags based on CVC5's actual build configuration
+            args = [
+                # Force C++ mode for header files
+                '-x', 'c++',
+                # C++ standard
+                '-std=c++17',
+                
+                # Include paths (critical for CVC5)
+                '-I./include',                    # Public headers
+                '-I./build/include',              # Generated headers
+                '-I./src/include',                # Internal headers
+                '-I./src/.',                      # Source directory
+                '-I./build/src',                  # Build source directory
+                '-isystem', './build/deps/include',  # Dependencies
+                
+                # System include paths for Linux
+                '-I/usr/include',
+                '-I/usr/include/c++/11',
+                '-I/usr/include/x86_64-linux-gnu/c++/11',
+                '-I/usr/include/c++/11/x86_64-linux-gnu',
+                '-I/usr/local/include',
+                
+                # CVC5-specific preprocessor definitions
+                '-DCVC5_ASSERTIONS',
+                '-DCVC5_DEBUG', 
+                '-DCVC5_STATISTICS_ON',
+                '-DCVC5_TRACING',
+                '-DCVC5_USE_POLY',
+                '-D__BUILDING_CVC5LIB',
+                '-Dcvc5_obj_EXPORTS',
+                
+                # Compiler flags used by CVC5
+                '-Wall',
+                '-Wsuggest-override',
+                '-Wnon-virtual-dtor', 
+                '-Wimplicit-fallthrough',
+                '-Wshadow',
+                '-fno-operator-names',
+                '-fno-extern-tls-init',
+                '-Wno-deprecated-declarations',
+                '-Wno-error=deprecated-declarations',
+                '-fPIC',
+                '-fvisibility=default',
+                
+                # Additional flags for better parsing
+                '-fparse-all-comments',
+                '-Wno-unknown-pragmas',
+                '-Wno-unused-parameter',
+                '-Wno-unused-variable',
+                '-Wno-unused-function'
+            ]
+            
             tu = index.parse(file_path, args=args)
             
             functions = []
@@ -113,7 +165,7 @@ class CommitCoverageAnalyzer:
             return functions
             
         except Exception as e:
-            print(f"Error parsing {file_path} with clang: {e}")
+            print(f"Warning: Could not parse {file_path} with clang: {e}")
             return []
     
     def get_function_signature(self, cursor) -> Optional[str]:
@@ -247,52 +299,95 @@ class CommitCoverageAnalyzer:
             self.coverage_map = json.load(f)
         print(f"Loaded coverage mapping with {len(self.coverage_map)} functions")
     
-    def find_tests_for_functions(self, functions: List[str]) -> Set[str]:
+    def find_tests_for_functions(self, functions: List[str]) -> Dict:
         """Find unique tests that cover the given functions."""
         if not self.coverage_map:
             print("Error: Coverage mapping not loaded")
-            return set()
+            return {
+                'all_covering_tests': set(),
+                'functions_with_tests': 0,
+                'functions_without_tests': 0,
+                'total_tests': 0,
+                'function_test_counts': {},
+                'test_function_counts': {},
+                'direct_matches': 0,
+                'path_removed_matches': 0
+            }
         
         print(f"Finding tests for {len(functions)} functions...")
         
         all_covering_tests = set()
         functions_with_tests = 0
+        functions_without_tests = 0
+        function_test_counts = {}
+        test_function_counts = {}
+        direct_matches = 0
+        path_removed_matches = 0
         
         for func in functions:
-            # Try exact match first
+            matching_tests = set()
+            match_type = "none"
+            
+            # Strategy 1: Try direct match first
             if func in self.coverage_map:
                 tests = self.coverage_map[func]
-                all_covering_tests.update(tests)
-                functions_with_tests += 1
-                print(f"  ✓ {func}: {len(tests)} tests")
+                matching_tests.update(tests)
+                match_type = "direct"
+                direct_matches += 1
             else:
-                # TODO: Try flexible matching - remove line numbers and normalize const placement
-                # func_without_line = func.rsplit(':', 1)[0]  # Remove last colon and line number
-                # normalized_func = self.normalize_function_signature(func_without_line)
-                # 
-                # # Look for functions with same signature but different line numbers
-                # matches = []
-                # for coverage_func, tests in self.coverage_map.items():
-                #     coverage_func_without_line = coverage_func.rsplit(':', 1)[0]
-                #     normalized_coverage = self.normalize_function_signature(coverage_func_without_line)
-                #     if normalized_func == normalized_coverage:
-                #         matches.append((coverage_func, tests))
-                # 
-                # if matches:
-                #     # Use the first match (they should all be the same function)
-                #     matched_func, tests = matches[0]
-                #     all_covering_tests.update(tests)
-                #     functions_with_tests += 1
-                #     print(f"  ~ {func}: {len(tests)} tests (matched {matched_func})")
-                # else:
-                #     print(f"  ✗ {func}: No tests found")
+                # Strategy 2: Try matching without path (remove file path from our function)
+                if ':' in func:
+                    # Extract just the function signature part (everything after the first colon)
+                    func_signature = ':'.join(func.split(':')[1:])
+                    
+                    # Look for coverage entries that match this function signature
+                    for coverage_key, tests in self.coverage_map.items():
+                        if ':' in coverage_key:
+                            # Extract function signature from coverage key (everything after first colon, before last colon)
+                            coverage_parts = coverage_key.split(':')
+                            if len(coverage_parts) >= 3:
+                                coverage_func = ':'.join(coverage_parts[1:-1])  # Everything except first (path) and last (line)
+                                
+                                if func_signature == coverage_func:
+                                    matching_tests.update(tests)
+                                    match_type = "path_removed"
+                                    path_removed_matches += 1
+                                    break  # Found match without path
+            
+            if matching_tests:
+                all_covering_tests.update(matching_tests)
+                functions_with_tests += 1
+                function_test_counts[func] = len(matching_tests)
                 
+                # Count how many functions each test covers
+                for test in matching_tests:
+                    if test not in test_function_counts:
+                        test_function_counts[test] = 0
+                    test_function_counts[test] += 1
+                
+                print(f"  ✓ {func} ({match_type}): {len(matching_tests)} tests")
+            else:
+                functions_without_tests += 1
+                function_test_counts[func] = 0
                 print(f"  ✗ {func}: No tests found")
         
+        print(f"\nMATCHING STATISTICS:")
         print(f"Functions with test coverage: {functions_with_tests}/{len(functions)}")
+        print(f"Functions without test coverage: {functions_without_tests}/{len(functions)}")
+        print(f"Direct matches: {direct_matches}")
+        print(f"Path-removed matches: {path_removed_matches}")
         print(f"Total unique tests found: {len(all_covering_tests)}")
         
-        return all_covering_tests
+        return {
+            'all_covering_tests': all_covering_tests,
+            'functions_with_tests': functions_with_tests,
+            'functions_without_tests': functions_without_tests,
+            'total_tests': len(all_covering_tests),
+            'function_test_counts': function_test_counts,
+            'test_function_counts': test_function_counts,
+            'direct_matches': direct_matches,
+            'path_removed_matches': path_removed_matches
+        }
     
     def normalize_function_signature(self, func_sig: str) -> str:
         """Normalize function signature by standardizing const placement."""
@@ -346,20 +441,18 @@ class CommitCoverageAnalyzer:
         
         # Step 2: Load coverage mapping and find tests
         self.load_coverage_mapping(coverage_json_path)
-        covering_tests = self.find_tests_for_functions(changed_functions)
+        test_results = self.find_tests_for_functions(changed_functions)
         
         # Step 3: Clean up memory
         self.cleanup_coverage_mapping()
         
-        # Step 4: Generate summary
-        functions_with_tests = sum(1 for func in changed_functions if func in self.coverage_map) if self.coverage_map else 0
-        
+        # Step 4: Generate detailed statistics
         summary = {
             'total_functions': len(changed_functions),
-            'functions_with_tests': functions_with_tests,
-            'functions_without_tests': len(changed_functions) - functions_with_tests,
-            'total_covering_tests': len(covering_tests),
-            'coverage_percentage': (functions_with_tests / len(changed_functions) * 100) if changed_functions else 0
+            'functions_with_tests': test_results['functions_with_tests'],
+            'functions_without_tests': test_results['functions_without_tests'],
+            'total_covering_tests': test_results['total_tests'],
+            'coverage_percentage': (test_results['functions_with_tests'] / len(changed_functions) * 100) if changed_functions else 0
         }
         
         print(f"\n{'='*60}")
@@ -371,7 +464,26 @@ class CommitCoverageAnalyzer:
         print(f"Coverage percentage: {summary['coverage_percentage']:.1f}%")
         print(f"Total unique tests covering changes: {summary['total_covering_tests']}")
         
+        # Summary statistics only
+        print(f"\n{'='*60}")
+        print(f"SUMMARY STATISTICS")
+        print(f"{'='*60}")
+        
+        # Show only counts, not individual mappings
+        function_test_counts = test_results['function_test_counts']
+        if function_test_counts:
+            functions_with_tests = sum(1 for count in function_test_counts.values() if count > 0)
+            functions_without_tests = sum(1 for count in function_test_counts.values() if count == 0)
+            print(f"Functions with tests: {functions_with_tests}")
+            print(f"Functions without tests: {functions_without_tests}")
+        
+        test_function_counts = test_results['test_function_counts']
+        if test_function_counts:
+            total_tests = len(test_function_counts)
+            print(f"Total unique tests: {total_tests}")
+        
         # Show some covering tests
+        covering_tests = test_results['all_covering_tests']
         if covering_tests:
             print(f"\nSample covering tests (showing first 10):")
             for i, test in enumerate(sorted(covering_tests)[:10], 1):

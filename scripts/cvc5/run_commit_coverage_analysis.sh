@@ -7,8 +7,9 @@ set -e
 
 # Default values
 COMMITS_TO_ANALYZE=${1:-10}
+PYTHON_SCRIPT=${2:-"$(dirname "$0")/commit_coverage_analyzer.py"}
+COVERAGE_FILE=${3:-"coverage_mapping_merged.json"}
 ARTIFACT_NAME="coverage-mapping-final"
-COVERAGE_FILE="coverage_mapping_merged.json"
 
 echo "=========================================="
 echo "CVC5 Commit Coverage Analysis"
@@ -32,7 +33,7 @@ fi
 
 # Get the last N commits from the current branch
 echo "Getting last $COMMITS_TO_ANALYZE commits..."
-COMMITS=$(git log --oneline -n $COMMITS_TO_ANALYZE --format="%H")
+COMMITS=$(git log -n $COMMITS_TO_ANALYZE --format="%H")
 
 if [ -z "$COMMITS" ]; then
     echo "No commits found"
@@ -63,7 +64,7 @@ for commit in $COMMITS; do
     echo ""
     
     # Run the coverage analysis (no output file, just console output)
-    python3 scripts/cvc5/commit_coverage_analyzer.py $commit --coverage-json $COVERAGE_FILE
+    python3 "$PYTHON_SCRIPT" $commit --coverage-json $COVERAGE_FILE
     
     echo ""
     echo "----------------------------------------"
