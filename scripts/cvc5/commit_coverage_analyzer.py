@@ -93,6 +93,8 @@ class CommitCoverageAnalyzer:
             
             # Comprehensive flags based on CVC5's actual build configuration
             args = [
+                # Force C++ mode for header files
+                '-x', 'c++',
                 # C++ standard
                 '-std=c++17',
                 
@@ -128,7 +130,6 @@ class CommitCoverageAnalyzer:
                 '-Wshadow',
                 '-fno-operator-names',
                 '-fno-extern-tls-init',
-                '-Wno-class-memaccess',
                 '-Wno-deprecated-declarations',
                 '-Wno-error=deprecated-declarations',
                 '-fPIC',
@@ -427,24 +428,23 @@ class CommitCoverageAnalyzer:
         print(f"Coverage percentage: {summary['coverage_percentage']:.1f}%")
         print(f"Total unique tests covering changes: {summary['total_covering_tests']}")
         
-        # Detailed statistics
+        # Summary statistics only
         print(f"\n{'='*60}")
-        print(f"DETAILED STATISTICS")
+        print(f"SUMMARY STATISTICS")
         print(f"{'='*60}")
         
-        # Function-to-test mapping statistics
+        # Show only counts, not individual mappings
         function_test_counts = test_results['function_test_counts']
         if function_test_counts:
-            print(f"Function-to-test mapping:")
-            for func, count in function_test_counts.items():
-                print(f"  {count:3d} tests: {func}")
+            functions_with_tests = sum(1 for count in function_test_counts.values() if count > 0)
+            functions_without_tests = sum(1 for count in function_test_counts.values() if count == 0)
+            print(f"Functions with tests: {functions_with_tests}")
+            print(f"Functions without tests: {functions_without_tests}")
         
-        # Test-to-function mapping statistics
         test_function_counts = test_results['test_function_counts']
         if test_function_counts:
-            print(f"\nTest-to-function mapping:")
-            for test, count in test_function_counts.items():
-                print(f"  {count:3d} functions: {test}")
+            total_tests = len(test_function_counts)
+            print(f"Total unique tests: {total_tests}")
         
         # Show some covering tests
         covering_tests = test_results['all_covering_tests']
