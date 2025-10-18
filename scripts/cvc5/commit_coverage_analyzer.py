@@ -309,7 +309,9 @@ class CommitCoverageAnalyzer:
                 'functions_without_tests': 0,
                 'total_tests': 0,
                 'function_test_counts': {},
-                'test_function_counts': {}
+                'test_function_counts': {},
+                'direct_matches': 0,
+                'path_removed_matches': 0
             }
         
         print(f"Finding tests for {len(functions)} functions...")
@@ -319,29 +321,61 @@ class CommitCoverageAnalyzer:
         functions_without_tests = 0
         function_test_counts = {}
         test_function_counts = {}
+        direct_matches = 0
+        path_removed_matches = 0
         
         for func in functions:
-            # Try exact match first
+            matching_tests = set()
+            match_type = "none"
+            
+            # Strategy 1: Try direct match first
             if func in self.coverage_map:
                 tests = self.coverage_map[func]
-                all_covering_tests.update(tests)
+                matching_tests.update(tests)
+                match_type = "direct"
+                direct_matches += 1
+            else:
+                # Strategy 2: Try matching without path (remove file path from our function)
+                if ':' in func:
+                    # Extract just the function signature part (everything after the first colon)
+                    func_signature = ':'.join(func.split(':')[1:])
+                    
+                    # Look for coverage entries that match this function signature
+                    for coverage_key, tests in self.coverage_map.items():
+                        if ':' in coverage_key:
+                            # Extract function signature from coverage key (everything after first colon, before last colon)
+                            coverage_parts = coverage_key.split(':')
+                            if len(coverage_parts) >= 3:
+                                coverage_func = ':'.join(coverage_parts[1:-1])  # Everything except first (path) and last (line)
+                                
+                                if func_signature == coverage_func:
+                                    matching_tests.update(tests)
+                                    match_type = "path_removed"
+                                    path_removed_matches += 1
+                                    break  # Found match without path
+            
+            if matching_tests:
+                all_covering_tests.update(matching_tests)
                 functions_with_tests += 1
-                function_test_counts[func] = len(tests)
+                function_test_counts[func] = len(matching_tests)
                 
                 # Count how many functions each test covers
-                for test in tests:
+                for test in matching_tests:
                     if test not in test_function_counts:
                         test_function_counts[test] = 0
                     test_function_counts[test] += 1
                 
-                print(f"  ✓ {func}: {len(tests)} tests")
+                print(f"  ✓ {func} ({match_type}): {len(matching_tests)} tests")
             else:
                 functions_without_tests += 1
                 function_test_counts[func] = 0
                 print(f"  ✗ {func}: No tests found")
         
+        print(f"\nMATCHING STATISTICS:")
         print(f"Functions with test coverage: {functions_with_tests}/{len(functions)}")
         print(f"Functions without test coverage: {functions_without_tests}/{len(functions)}")
+        print(f"Direct matches: {direct_matches}")
+        print(f"Path-removed matches: {path_removed_matches}")
         print(f"Total unique tests found: {len(all_covering_tests)}")
         
         return {
@@ -350,7 +384,9 @@ class CommitCoverageAnalyzer:
             'functions_without_tests': functions_without_tests,
             'total_tests': len(all_covering_tests),
             'function_test_counts': function_test_counts,
-            'test_function_counts': test_function_counts
+            'test_function_counts': test_function_counts,
+            'direct_matches': direct_matches,
+            'path_removed_matches': path_removed_matches
         }
     
     def normalize_function_signature(self, func_sig: str) -> str:
