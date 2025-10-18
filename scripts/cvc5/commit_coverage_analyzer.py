@@ -298,16 +298,26 @@ class CommitCoverageAnalyzer:
             self.coverage_map = json.load(f)
         print(f"Loaded coverage mapping with {len(self.coverage_map)} functions")
     
-    def find_tests_for_functions(self, functions: List[str]) -> Set[str]:
+    def find_tests_for_functions(self, functions: List[str]) -> Dict:
         """Find unique tests that cover the given functions."""
         if not self.coverage_map:
             print("Error: Coverage mapping not loaded")
-            return set()
+            return {
+                'all_covering_tests': set(),
+                'functions_with_tests': 0,
+                'functions_without_tests': 0,
+                'total_tests': 0,
+                'function_test_counts': {},
+                'test_function_counts': {}
+            }
         
         print(f"Finding tests for {len(functions)} functions...")
         
         all_covering_tests = set()
         functions_with_tests = 0
+        functions_without_tests = 0
+        function_test_counts = {}
+        test_function_counts = {}
         
         for func in functions:
             # Try exact match first
@@ -315,35 +325,32 @@ class CommitCoverageAnalyzer:
                 tests = self.coverage_map[func]
                 all_covering_tests.update(tests)
                 functions_with_tests += 1
+                function_test_counts[func] = len(tests)
+                
+                # Count how many functions each test covers
+                for test in tests:
+                    if test not in test_function_counts:
+                        test_function_counts[test] = 0
+                    test_function_counts[test] += 1
+                
                 print(f"  ✓ {func}: {len(tests)} tests")
             else:
-                # TODO: Try flexible matching - remove line numbers and normalize const placement
-                # func_without_line = func.rsplit(':', 1)[0]  # Remove last colon and line number
-                # normalized_func = self.normalize_function_signature(func_without_line)
-                # 
-                # # Look for functions with same signature but different line numbers
-                # matches = []
-                # for coverage_func, tests in self.coverage_map.items():
-                #     coverage_func_without_line = coverage_func.rsplit(':', 1)[0]
-                #     normalized_coverage = self.normalize_function_signature(coverage_func_without_line)
-                #     if normalized_func == normalized_coverage:
-                #         matches.append((coverage_func, tests))
-                # 
-                # if matches:
-                #     # Use the first match (they should all be the same function)
-                #     matched_func, tests = matches[0]
-                #     all_covering_tests.update(tests)
-                #     functions_with_tests += 1
-                #     print(f"  ~ {func}: {len(tests)} tests (matched {matched_func})")
-                # else:
-                #     print(f"  ✗ {func}: No tests found")
-                
+                functions_without_tests += 1
+                function_test_counts[func] = 0
                 print(f"  ✗ {func}: No tests found")
         
         print(f"Functions with test coverage: {functions_with_tests}/{len(functions)}")
+        print(f"Functions without test coverage: {functions_without_tests}/{len(functions)}")
         print(f"Total unique tests found: {len(all_covering_tests)}")
         
-        return all_covering_tests
+        return {
+            'all_covering_tests': all_covering_tests,
+            'functions_with_tests': functions_with_tests,
+            'functions_without_tests': functions_without_tests,
+            'total_tests': len(all_covering_tests),
+            'function_test_counts': function_test_counts,
+            'test_function_counts': test_function_counts
+        }
     
     def normalize_function_signature(self, func_sig: str) -> str:
         """Normalize function signature by standardizing const placement."""
@@ -397,20 +404,18 @@ class CommitCoverageAnalyzer:
         
         # Step 2: Load coverage mapping and find tests
         self.load_coverage_mapping(coverage_json_path)
-        covering_tests = self.find_tests_for_functions(changed_functions)
+        test_results = self.find_tests_for_functions(changed_functions)
         
         # Step 3: Clean up memory
         self.cleanup_coverage_mapping()
         
-        # Step 4: Generate summary
-        functions_with_tests = sum(1 for func in changed_functions if func in self.coverage_map) if self.coverage_map else 0
-        
+        # Step 4: Generate detailed statistics
         summary = {
             'total_functions': len(changed_functions),
-            'functions_with_tests': functions_with_tests,
-            'functions_without_tests': len(changed_functions) - functions_with_tests,
-            'total_covering_tests': len(covering_tests),
-            'coverage_percentage': (functions_with_tests / len(changed_functions) * 100) if changed_functions else 0
+            'functions_with_tests': test_results['functions_with_tests'],
+            'functions_without_tests': test_results['functions_without_tests'],
+            'total_covering_tests': test_results['total_tests'],
+            'coverage_percentage': (test_results['functions_with_tests'] / len(changed_functions) * 100) if changed_functions else 0
         }
         
         print(f"\n{'='*60}")
@@ -422,7 +427,27 @@ class CommitCoverageAnalyzer:
         print(f"Coverage percentage: {summary['coverage_percentage']:.1f}%")
         print(f"Total unique tests covering changes: {summary['total_covering_tests']}")
         
+        # Detailed statistics
+        print(f"\n{'='*60}")
+        print(f"DETAILED STATISTICS")
+        print(f"{'='*60}")
+        
+        # Function-to-test mapping statistics
+        function_test_counts = test_results['function_test_counts']
+        if function_test_counts:
+            print(f"Function-to-test mapping:")
+            for func, count in function_test_counts.items():
+                print(f"  {count:3d} tests: {func}")
+        
+        # Test-to-function mapping statistics
+        test_function_counts = test_results['test_function_counts']
+        if test_function_counts:
+            print(f"\nTest-to-function mapping:")
+            for test, count in test_function_counts.items():
+                print(f"  {count:3d} functions: {test}")
+        
         # Show some covering tests
+        covering_tests = test_results['all_covering_tests']
         if covering_tests:
             print(f"\nSample covering tests (showing first 10):")
             for i, test in enumerate(sorted(covering_tests)[:10], 1):
