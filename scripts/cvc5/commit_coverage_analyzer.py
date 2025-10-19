@@ -47,16 +47,16 @@ class CommitCoverageAnalyzer:
             return None
     
     def get_commit_diff(self, commit_hash: str) -> str:
-        """Get the diff for a commit"""
+        """Get the unified diff for a commit with zero context for precise line tracking."""
         try:
             commit = self.repo.commit(commit_hash)
             if len(commit.parents) > 0:
                 parent = commit.parents[0]
-                result = subprocess.run(['git', 'show', commit_hash], 
+                result = subprocess.run(['git', 'show', '-U0', '--no-color', commit_hash], 
                                       capture_output=True, text=True, cwd=self.repo_path)
                 return result.stdout
             else:
-                result = subprocess.run(['git', 'show', commit_hash], 
+                result = subprocess.run(['git', 'show', '-U0', '--no-color', commit_hash], 
                                       capture_output=True, text=True, cwd=self.repo_path)
                 return result.stdout
         except Exception as e:
@@ -64,23 +64,48 @@ class CommitCoverageAnalyzer:
             return ""
     
     def get_changed_lines(self, diff_text: str) -> Dict[str, Set[int]]:
-        """Extract changed line numbers from diff text for each file"""
-        changed_lines = {}
-        current_file = None
-        
-        for line in diff_text.split('\n'):
-            if line.startswith('+++ b/'):
-                current_file = line[6:]
+        """Extract precise changed new-file line numbers per file from a -U0 diff.
+        Tracks only '+' lines (added/modified) and maps them to new file line numbers.
+        """
+        changed_lines: Dict[str, Set[int]] = {}
+        current_file: Optional[str] = None
+        in_hunk = False
+        new_line = None
+
+        lines = diff_text.split('\n')
+        for raw in lines:
+            if raw.startswith('diff --git '):
+                current_file = None
+                in_hunk = False
+                new_line = None
+                continue
+            if raw.startswith('+++ b/'):
+                current_file = raw[6:]
                 if current_file not in changed_lines:
                     changed_lines[current_file] = set()
-            elif line.startswith('@@'):
-                match = re.search(r'@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@', line)
-                if match and current_file:
-                    start_line = int(match.group(1))
-                    line_count = int(match.group(2) or 1)
-                    for i in range(start_line, start_line + line_count):
-                        changed_lines[current_file].add(i)
-        
+                continue
+            if raw.startswith('@@ '):
+                # Hunk header, capture new file start
+                m = re.search(r'@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@', raw)
+                if current_file and m:
+                    new_line = int(m.group(1))
+                    in_hunk = True
+                else:
+                    in_hunk = False
+                    new_line = None
+                continue
+            if not in_hunk or current_file is None or new_line is None:
+                continue
+            if raw.startswith('+') and not raw.startswith('+++'):
+                changed_lines[current_file].add(new_line)
+                new_line += 1
+            elif raw.startswith('-') and not raw.startswith('---'):
+                # deletion: only old file line advances; new_line stays
+                pass
+            else:
+                # context line (in -U0 there should be none, but be safe)
+                new_line += 1
+
         return changed_lines
     
     def extract_functions_with_clang(self, file_path: str) -> List[Dict]:
@@ -330,6 +355,8 @@ class CommitCoverageAnalyzer:
                 continue
 
             print(f"  Analyzing {file_path} (changed lines: {len(changed_lines)})")
+            if len(changed_lines) > 50:
+                print(f"    Note: large change hunk, limiting to C++ overlap only")
 
             after_src = self.get_file_text_at_commit(commit_hash, file_path)
             if after_src is None:
@@ -365,6 +392,7 @@ class CommitCoverageAnalyzer:
                     continue
 
                 # Body overlap check
+                # Only consider overlap with C++ files (.cc/.cpp/.c/.h/.hpp already filtered)
                 overlaps = any((f['start'] <= ln <= f['end']) for ln in changed_lines)
 
                 # Signature change check
