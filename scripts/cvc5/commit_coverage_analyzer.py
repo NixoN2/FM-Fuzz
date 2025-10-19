@@ -86,7 +86,10 @@ class CommitCoverageAnalyzer:
     def extract_functions_with_clang(self, file_path: str) -> List[Dict]:
         """Extract function signatures using clang AST parsing"""
         if not CLANG_AVAILABLE:
+            print("DEBUG_CLANG: clang.cindex not available")
             return []
+        
+        print(f"DEBUG_CLANG: Starting clang parsing of {file_path}")
         
         try:
             index = clang.cindex.Index.create()
@@ -143,29 +146,51 @@ class CommitCoverageAnalyzer:
                 '-Wno-unused-function'
             ]
             
+            print(f"DEBUG_CLANG: Parsing with args: {' '.join(args[:10])}... (showing first 10)")
+            
             tu = index.parse(file_path, args=args)
+            
+            # Debug: Check for parsing errors
+            if tu.diagnostics:
+                print(f"DEBUG_CLANG: Found {len(tu.diagnostics)} diagnostics:")
+                for diag in tu.diagnostics:
+                    print(f"DEBUG_CLANG_DIAG: {diag.severity}: {diag.spelling}")
             
             functions = []
             
-            def visit_node(node):
+            def visit_node(node, depth=0):
                 if node.kind in [clang.cindex.CursorKind.FUNCTION_DECL, 
                                clang.cindex.CursorKind.CXX_METHOD]:
+                    print(f"DEBUG_CLANG_FUNCTION: Found function: {node.spelling} at line {node.location.line}")
+                    
                     signature = self.get_function_signature(node)
-                    if signature and self.is_cvc5_function(signature):
-                        functions.append({
+                    is_cvc5 = self.is_cvc5_function(signature) if signature else False
+                    
+                    if signature and is_cvc5:
+                        func_data = {
                             'signature': signature,
                             'line': node.location.line,
                             'file': file_path
-                        })
+                        }
+                        functions.append(func_data)
+                        print(f"DEBUG_CLANG_FUNCTION_ADDED: {signature}")
+                    else:
+                        print(f"DEBUG_CLANG_FUNCTION_REJECTED: {node.spelling} (signature: '{signature}', is_cvc5: {is_cvc5})")
                 
                 for child in node.get_children():
-                    visit_node(child)
+                    visit_node(child, depth + 1)
             
+            print(f"DEBUG_CLANG: Starting AST traversal...")
             visit_node(tu.cursor)
+            
+            print(f"DEBUG_CLANG: Parsing complete. Found {len(functions)} functions")
+            
             return functions
             
         except Exception as e:
-            print(f"Warning: Could not parse {file_path} with clang: {e}")
+            print(f"DEBUG_CLANG_ERROR: Could not parse {file_path} with clang: {e}")
+            import traceback
+            print(f"DEBUG_CLANG_ERROR_TRACEBACK: {traceback.format_exc()}")
             return []
     
     def get_function_signature(self, cursor) -> Optional[str]:
@@ -178,30 +203,44 @@ class CommitCoverageAnalyzer:
             qualified_name = self.get_qualified_name(cursor)
             params = []
             
+            # Get parameters with more detailed type information
             for child in cursor.get_children():
                 if child.kind == clang.cindex.CursorKind.PARM_DECL:
                     t = child.type
+                    # Use the canonical type for better accuracy
                     param_type = t.get_canonical().spelling
                     
+                    # Handle const qualification more carefully
                     if t.is_const_qualified():
-                        param_type = param_type.replace("const ", "")
+                        # Move const to the right position
                         if "&" in param_type:
-                            param_type = param_type.replace("&", " const&")
+                            param_type = param_type.replace("const ", "").replace("&", " const&")
                         elif "*" in param_type:
-                            param_type = param_type.replace("*", " const*")
+                            param_type = param_type.replace("const ", "").replace("*", " const*")
                         else:
-                            param_type = param_type + " const"
+                            param_type = param_type.replace("const ", "") + " const"
                     
-                    param_type = param_type.replace(" &", "&").replace(" *", "*")
+                    # Clean up spacing
+                    param_type = param_type.replace("  ", " ").strip()
                     params.append(param_type)
 
             param_str = ", ".join(params)
             const_suffix = " const" if cursor.is_const_method() else ""
+            
+            # Add ABI information if present (like [abi:cxx11])
+            abi_info = ""
+            if hasattr(cursor, 'mangled_name') and cursor.mangled_name:
+                # Check for ABI-specific mangling
+                if 'abi:cxx11' in str(cursor.mangled_name):
+                    abi_info = "[abi:cxx11]"
+            
             line = cursor.location.line
-
-            signature = f"{qualified_name}({param_str}){const_suffix}:{line}"
+            signature = f"{qualified_name}({param_str}){abi_info}{const_suffix}:{line}"
+            
+            print(f"DEBUG_SIGNATURE: Generated '{signature}'")
             return signature
         except Exception as e:
+            print(f"DEBUG_SIGNATURE_ERROR: Error generating signature: {e}")
             return None
     
     def get_qualified_name(self, cursor) -> str:
@@ -216,12 +255,22 @@ class CommitCoverageAnalyzer:
                               clang.cindex.CursorKind.FUNCTION_DECL,
                               clang.cindex.CursorKind.CXX_METHOD]:
                 name = current.spelling
-                if name:
+                if name and name not in parts:  # Avoid duplicates
                     parts.append(name)
             current = current.semantic_parent
         
         parts.reverse()
-        return "::".join(parts)
+        qualified_name = "::".join(parts)
+        
+        # Ensure we have the full cvc5:: namespace
+        if not qualified_name.startswith('cvc5::'):
+            # Try to find the actual namespace context
+            if 'cvc5::' in qualified_name:
+                # Extract everything from cvc5:: onwards
+                cvc5_index = qualified_name.find('cvc5::')
+                qualified_name = qualified_name[cvc5_index:]
+        
+        return qualified_name
     
     def is_cvc5_function(self, signature: str) -> bool:
         """Check if a function signature belongs to cvc5"""
@@ -278,7 +327,7 @@ class CommitCoverageAnalyzer:
             
             print(f"  Analyzing {file_path} (changed lines: {sorted(list(changed_lines))[:10]}{'...' if len(changed_lines) > 10 else ''})")
             
-            # Extract functions
+            # Extract functions from the changed file
             functions = self.extract_functions_with_clang(str(full_path))
             
             # Find functions near changed lines
@@ -288,21 +337,44 @@ class CommitCoverageAnalyzer:
                     mapping_entry = f"{file_path}:{func['signature']}"
                     changed_functions.append(mapping_entry)
                     print(f"    Found: {mapping_entry}")
+            
+            # Also analyze corresponding header files for .cpp files
+            if file_path.endswith(('.cpp', '.cc', '.c')):
+                # Look for corresponding .h file
+                base_name = file_path.rsplit('.', 1)[0]
+                header_file = base_name + '.h'
+                header_path = self.repo_path / header_file
+                
+                if header_path.exists():
+                    print(f"  Also analyzing header {header_file}")
+                    header_functions = self.extract_functions_with_clang(str(header_path))
+                    
+                    # For header files, include all functions (they're often templates/inline)
+                    for func in header_functions:
+                        mapping_entry = f"{header_file}:{func['signature']}"
+                        changed_functions.append(mapping_entry)
+                        print(f"    Found: {mapping_entry}")
         
         print(f"Found {len(changed_functions)} changed functions")
         return changed_functions
     
     def load_coverage_mapping(self, coverage_json_path: str):
         """Load coverage mapping only when needed."""
-        print(f"Loading coverage mapping from {coverage_json_path}...")
+        print(f"DEBUG_COVERAGE: Loading coverage mapping from {coverage_json_path}...")
         with open(coverage_json_path, 'r') as f:
             self.coverage_map = json.load(f)
-        print(f"Loaded coverage mapping with {len(self.coverage_map)} functions")
+        print(f"DEBUG_COVERAGE: Loaded coverage mapping with {len(self.coverage_map)} functions")
+        
+        # Show sample keys for debugging
+        sample_keys = list(self.coverage_map.keys())[:5]
+        print(f"DEBUG_COVERAGE_SAMPLE_KEYS: Sample coverage mapping keys:")
+        for i, key in enumerate(sample_keys):
+            print(f"DEBUG_COVERAGE_KEY_{i}: '{key}' -> {len(self.coverage_map[key])} tests")
     
     def find_tests_for_functions(self, functions: List[str]) -> Dict:
         """Find unique tests that cover the given functions."""
         if not self.coverage_map:
-            print("Error: Coverage mapping not loaded")
+            print("DEBUG_MATCHING: Error: Coverage mapping not loaded")
             return {
                 'all_covering_tests': set(),
                 'functions_with_tests': 0,
@@ -314,7 +386,8 @@ class CommitCoverageAnalyzer:
                 'path_removed_matches': 0
             }
         
-        print(f"Finding tests for {len(functions)} functions...")
+        print(f"DEBUG_MATCHING: Finding tests for {len(functions)} functions...")
+        print(f"DEBUG_MATCHING: Coverage map has {len(self.coverage_map)} entries")
         
         all_covering_tests = set()
         functions_with_tests = 0
@@ -324,7 +397,7 @@ class CommitCoverageAnalyzer:
         direct_matches = 0
         path_removed_matches = 0
         
-        for func in functions:
+        for i, func in enumerate(functions):
             matching_tests = set()
             match_type = "none"
             
@@ -365,18 +438,18 @@ class CommitCoverageAnalyzer:
                         test_function_counts[test] = 0
                     test_function_counts[test] += 1
                 
-                print(f"  ✓ {func} ({match_type}): {len(matching_tests)} tests")
+                print(f"DEBUG_MATCHING_SUCCESS: ✓ {func} ({match_type}): {len(matching_tests)} tests")
             else:
                 functions_without_tests += 1
                 function_test_counts[func] = 0
-                print(f"  ✗ {func}: No tests found")
+                print(f"DEBUG_MATCHING_FAILED: ✗ {func}: No tests found")
         
-        print(f"\nMATCHING STATISTICS:")
-        print(f"Functions with test coverage: {functions_with_tests}/{len(functions)}")
-        print(f"Functions without test coverage: {functions_without_tests}/{len(functions)}")
-        print(f"Direct matches: {direct_matches}")
-        print(f"Path-removed matches: {path_removed_matches}")
-        print(f"Total unique tests found: {len(all_covering_tests)}")
+        print(f"DEBUG_MATCHING_STATS: Matching statistics:")
+        print(f"DEBUG_MATCHING_STATS: Functions with test coverage: {functions_with_tests}/{len(functions)}")
+        print(f"DEBUG_MATCHING_STATS: Functions without test coverage: {functions_without_tests}/{len(functions)}")
+        print(f"DEBUG_MATCHING_STATS: Direct matches: {direct_matches}")
+        print(f"DEBUG_MATCHING_STATS: Path-removed matches: {path_removed_matches}")
+        print(f"DEBUG_MATCHING_STATS: Total unique tests found: {len(all_covering_tests)}")
         
         return {
             'all_covering_tests': all_covering_tests,

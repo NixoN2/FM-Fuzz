@@ -31,16 +31,20 @@ if [ ! -f "$COVERAGE_FILE" ]; then
     exit 1
 fi
 
-# Get the last N commits from the current branch
-echo "Getting last $COMMITS_TO_ANALYZE commits..."
-COMMITS=$(git log -n $COMMITS_TO_ANALYZE --format="%H")
+# Get commits that changed files in src/ folder
+echo "Getting commits that changed files in src/ folder..."
+COMMITS=$(git log --oneline -50 | while read commit msg; do 
+    if git show --name-only $commit | grep -q "^src/"; then 
+        echo "$commit"
+    fi
+done | head -$COMMITS_TO_ANALYZE)
 
 if [ -z "$COMMITS" ]; then
-    echo "No commits found"
+    echo "No commits found that changed src/ files"
     exit 1
 fi
 
-echo "Found commits:"
+echo "Found commits that changed src/ files:"
 echo "$COMMITS" | nl
 echo ""
 
