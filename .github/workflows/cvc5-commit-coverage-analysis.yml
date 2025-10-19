@@ -38,4 +38,4 @@ jobs:
       - name: Run commit coverage analysis
         run: |
           cd cvc5
-          ${{ github.workspace }}/scripts/cvc5/run_commit_coverage_analysis.sh 10 ${{ github.workspace }}/scripts/cvc5/commit_coverage_analyzer.py ../coverage_mapping_merged.json
+          ${{ github.workspace }}/scripts/cvc5/run_commit_coverage_analysis.sh 3 ${{ github.workspace }}/scripts/cvc5/commit_coverage_analyzer.py ../coverage_mapping_merged.json
