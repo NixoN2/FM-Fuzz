@@ -554,6 +554,43 @@ class CommitCoverageAnalyzer:
         
         print(f"DEBUG_MATCHING: Finding tests for {len(functions)} functions...")
         print(f"DEBUG_MATCHING: Coverage map has {len(self.coverage_map)} entries")
+
+        # --- Normalization helpers (gcov-style) ---
+        def strip_line_suffix(s: str) -> str:
+            if ':' in s:
+                base, last = s.rsplit(':', 1)
+                if last.isdigit():
+                    return base
+            return s
+
+        def split_path_and_sig(key: str):
+            no_line = strip_line_suffix(key)
+            if ':' in no_line:
+                path, sig = no_line.split(':', 1)
+                return path, sig
+            return '', no_line
+
+        def normalize_to_compare(sig_or_key: str) -> str:
+            base = strip_line_suffix(sig_or_key)
+            base = self.normalize_function_signature(base)
+            # Remove spaces before & and *
+            base = re.sub(r"\s+([&*])", r"\1", base)
+            # Single space after commas
+            base = re.sub(r",\s*", ", ", base)
+            # Collapse whitespace
+            base = re.sub(r"\s+", " ", base).strip()
+            return base
+
+        # Precompute normalized coverage lookup maps
+        cov_full_to_tests: Dict[str, Set[str]] = {}
+        cov_sig_to_tests: Dict[str, Set[str]] = {}
+        for k, tests in self.coverage_map.items():
+            norm_full = normalize_to_compare(k)  # path:signature
+            cov_full_to_tests.setdefault(norm_full, set()).update(tests)
+            _, sig = split_path_and_sig(k)
+            norm_sig = normalize_to_compare(sig)
+            cov_sig_to_tests.setdefault(norm_sig, set()).update(tests)
+        cov_sigs_list = list(cov_sig_to_tests.keys())
         
         # Show sample functions we're trying to match
         print(f"DEBUG_MATCHING_SAMPLE_FUNCTIONS: Sample functions to match:")
@@ -574,33 +611,44 @@ class CommitCoverageAnalyzer:
             matching_tests = set()
             match_type = "none"
             
-            # Strategy 1: Try direct match first
-            if func in self.coverage_map:
-                tests = self.coverage_map[func]
+            # Build our normalized keys
+            our_path, our_sig = split_path_and_sig(func)
+            our_full_norm = normalize_to_compare(f"{our_path}:{our_sig}")
+            our_sig_norm = normalize_to_compare(our_sig)
+
+            # Strategy 1: normalized direct (path+sig, ignore line)
+            if our_full_norm in cov_full_to_tests:
+                tests = cov_full_to_tests[our_full_norm]
                 matching_tests.update(tests)
                 match_type = "direct"
                 direct_matches += 1
                 print(f"DEBUG_MATCHING_DIRECT_SUCCESS: Direct match found for '{func}' -> {len(tests)} tests")
             else:
-                # Strategy 2: Try matching without path (remove file path from our function)
-                if ':' in func:
-                    # Extract just the function signature part (everything after the first colon)
-                    func_signature = ':'.join(func.split(':')[1:])
-                    
-                    # Look for coverage entries that match this function signature
-                    for coverage_key, tests in self.coverage_map.items():
-                        if ':' in coverage_key:
-                            # Extract function signature from coverage key (everything after first colon, before last colon)
-                            coverage_parts = coverage_key.split(':')
-                            if len(coverage_parts) >= 3:
-                                coverage_func = ':'.join(coverage_parts[1:-1])  # Everything except first (path) and last (line)
-                                
-                                if func_signature == coverage_func:
-                                    matching_tests.update(tests)
-                                    match_type = "path_removed"
-                                    path_removed_matches += 1
-                                    print(f"DEBUG_MATCHING_PATH_SUCCESS: Path-removed match found for '{func}' -> '{coverage_key}' -> {len(tests)} tests")
-                                    break  # Found match without path
+                # Strategy 2: normalized signature-only
+                if our_sig_norm in cov_sig_to_tests:
+                    tests = cov_sig_to_tests[our_sig_norm]
+                    matching_tests.update(tests)
+                    match_type = "path_removed"
+                    path_removed_matches += 1
+                    print(f"DEBUG_MATCHING_PATH_SUCCESS: Path-removed match found for '{func}' -> sig match -> {len(tests)} tests")
+                else:
+                    # Strategy 3: fuzzy among coverage signatures (path-agnostic)
+                    try:
+                        import difflib
+                        best = max(
+                            ((cov_sig, difflib.SequenceMatcher(None, our_sig_norm, cov_sig).ratio()) for cov_sig in cov_sigs_list),
+                            key=lambda x: x[1],
+                            default=(None, 0.0)
+                        )
+                        best_sig, best_ratio = best
+                        if best_sig is not None and best_ratio >= 0.95:
+                            tests = cov_sig_to_tests.get(best_sig, set())
+                            matching_tests.update(tests)
+                            match_type = f"fuzzy:{best_ratio:.2f}"
+                            path_removed_matches += 1
+                            print(f"DEBUG_MATCHING_FUZZY_SUCCESS: '{func}' -> '{best_sig}' ratio={best_ratio:.2f} tests={len(tests)}")
+                    except Exception:
+                        pass
             
             if matching_tests:
                 all_covering_tests.update(matching_tests)
