@@ -172,8 +172,6 @@ class CommitCoverageAnalyzer:
                         }
                         functions.append(func_data)
                         print(f"DEBUG_CVC5_FUNCTION: Found CVC5 function: {signature}")
-                    elif signature:
-                        print(f"DEBUG_NON_CVC5_FUNCTION: Rejected non-CVC5 function: {signature}")
                 
                 for child in node.get_children():
                     visit_node(child, depth + 1)

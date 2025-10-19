@@ -33,24 +33,30 @@ fi
 
 # Get commits that changed files in src/ folder
 echo "Getting commits that changed files in src/ folder..."
-COMMITS=$(git log --oneline -50 --format="%H" | while read commit; do 
-    if git show --name-only $commit 2>/dev/null | grep -q "^src/"; then 
-        echo "$commit"
+COMMITS=()
+while IFS= read -r commit; do
+    if git show --name-only "$commit" 2>/dev/null | grep -q "^src/"; then
+        COMMITS+=("$commit")
+        if [ ${#COMMITS[@]} -ge $COMMITS_TO_ANALYZE ]; then
+            break
+        fi
     fi
-done | head -$COMMITS_TO_ANALYZE)
+done < <(git log --oneline -50 --format="%H")
 
-if [ -z "$COMMITS" ]; then
+if [ ${#COMMITS[@]} -eq 0 ]; then
     echo "No commits found that changed src/ files"
     exit 1
 fi
 
 echo "Found commits that changed src/ files:"
-echo "$COMMITS" | nl
+for i in "${!COMMITS[@]}"; do
+    echo "$((i+1)). ${COMMITS[i]}"
+done
 echo ""
 
 # Analyze each commit
 COMMIT_COUNT=0
-for commit in $COMMITS; do
+for commit in "${COMMITS[@]}"; do
     COMMIT_COUNT=$((COMMIT_COUNT + 1))
     echo "=========================================="
     echo "ANALYZING COMMIT $COMMIT_COUNT/$COMMITS_TO_ANALYZE"
