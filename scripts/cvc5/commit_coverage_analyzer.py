@@ -369,14 +369,6 @@ class CommitCoverageAnalyzer:
 
             # Build indexes for before
             before_by_sig = {self.build_signature_key(f['signature']): f for f in before_funcs}
-            def base_name(sig: str) -> str:
-                try:
-                    return sig.split('(')[0].split('::')[-1]
-                except Exception:
-                    return sig
-            before_by_base: Dict[str, List[Dict]] = {}
-            for bf in before_funcs:
-                before_by_base.setdefault(base_name(bf['signature']), []).append(bf)
 
             # Helper to normalize function body slice
             def normalized_body(src: str, f: Dict) -> str:
@@ -386,36 +378,32 @@ class CommitCoverageAnalyzer:
                 snippet = "\n".join(lines[s-1:e])
                 return self.normalize_code(snippet)
 
-            for f in after_funcs:
-                sig = f['signature']
-                if not self.is_cvc5_function(sig):
-                    continue
+            # Per changed line: select the innermost enclosing function (smallest span)
+            selected: Dict[str, Dict] = {}
+            if after_funcs:
+                spans = [(f, (int(f['end']) - int(f['start']))) for f in after_funcs if self.is_cvc5_function(f['signature'])]
+                for ln in sorted(changed_lines):
+                    candidates = [f for f, span in spans if int(f['start']) <= ln <= int(f['end'])]
+                    if not candidates:
+                        continue
+                    # choose innermost by minimal span
+                    chosen = min(candidates, key=lambda x: (int(x['end']) - int(x['start']), int(x['start'])))
+                    key = self.build_signature_key(chosen['signature'])
+                    selected[key] = chosen
 
-                # Body overlap check
-                # Only consider overlap with C++ files (.cc/.cpp/.c/.h/.hpp already filtered)
-                overlaps = any((f['start'] <= ln <= f['end']) for ln in changed_lines)
-
-                # Signature change check
-                sig_key = self.build_signature_key(sig)
-                existed_before = sig_key in before_by_sig
-                sig_changed = False
-                if not existed_before and before_funcs:
-                    bn = base_name(sig)
-                    if bn in before_by_base and before_by_base[bn]:
-                        sig_changed = True
-
-                if not overlaps and not sig_changed:
-                    continue
-
-                # Exclude pure moves (identical body before/after when same signature existed)
-                if before_src is not None and existed_before and not sig_changed:
+            # Emit selected functions, dropping pure moves
+            for sig_key, f in selected.items():
+                # Exclude pure move if existed before and bodies equal
+                is_move = False
+                if before_src is not None and sig_key in before_by_sig:
                     bf = before_by_sig[sig_key]
                     if normalized_body(before_src, bf) == normalized_body(after_src, f):
-                        continue
-
-                mapping_entry = f"{file_path}:{sig}"
+                        is_move = True
+                if is_move:
+                    continue
+                mapping_entry = f"{file_path}:{f['signature']}"
                 changed_functions.append(mapping_entry)
-                print(f"    Selected: {mapping_entry} (overlap={overlaps}, sig_changed={sig_changed})")
+                print(f"    Selected: {mapping_entry} (overlap=True, sig_changed=False)")
 
         print(f"Found {len(changed_functions)} changed functions")
         return changed_functions
@@ -484,13 +472,20 @@ class CommitCoverageAnalyzer:
             def visit(n):
                 if n.kind in [clang.cindex.CursorKind.FUNCTION_DECL, clang.cindex.CursorKind.CXX_METHOD] and n.is_definition():
                     sig = self.get_function_signature(n)
-                    if sig and self.is_cvc5_function(sig):
-                        funcs.append({
-                            'signature': sig,
-                            'start': n.extent.start.line,
-                            'end': n.extent.end.line,
-                            'file': file_path
-                        })
+                    # Only keep functions physically defined in this file (exclude headers and system files)
+                    node_file = str(n.location.file) if n.location and n.location.file else None
+                    if sig and node_file and self.is_cvc5_function(sig):
+                        # Compare by suffix to allow absolute paths
+                        from os.path import normpath
+                        nf = normpath(node_file)
+                        exp = normpath(file_path)
+                        if nf.endswith(exp):
+                            funcs.append({
+                                'signature': sig,
+                                'start': n.extent.start.line,
+                                'end': n.extent.end.line,
+                                'file': node_file
+                            })
                 for c in n.get_children():
                     visit(c)
 
