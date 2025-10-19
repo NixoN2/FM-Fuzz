@@ -6,7 +6,7 @@
 set -e
 
 # Default values
-COMMITS_TO_ANALYZE=${1:-10}
+COMMITS_TO_ANALYZE=${1:-3}
 PYTHON_SCRIPT=${2:-"$(dirname "$0")/commit_coverage_analyzer.py"}
 COVERAGE_FILE=${3:-"coverage_mapping_merged.json"}
 ARTIFACT_NAME="coverage-mapping-final"
@@ -33,8 +33,8 @@ fi
 
 # Get commits that changed files in src/ folder
 echo "Getting commits that changed files in src/ folder..."
-COMMITS=$(git log --oneline -50 | while read commit msg; do 
-    if git show --name-only $commit | grep -q "^src/"; then 
+COMMITS=$(git log --oneline -50 --format="%H" | while read commit; do 
+    if git show --name-only $commit 2>/dev/null | grep -q "^src/"; then 
         echo "$commit"
     fi
 done | head -$COMMITS_TO_ANALYZE)

@@ -161,8 +161,6 @@ class CommitCoverageAnalyzer:
             def visit_node(node, depth=0):
                 if node.kind in [clang.cindex.CursorKind.FUNCTION_DECL, 
                                clang.cindex.CursorKind.CXX_METHOD]:
-                    print(f"DEBUG_CLANG_FUNCTION: Found function: {node.spelling} at line {node.location.line}")
-                    
                     signature = self.get_function_signature(node)
                     is_cvc5 = self.is_cvc5_function(signature) if signature else False
                     
@@ -173,9 +171,9 @@ class CommitCoverageAnalyzer:
                             'file': file_path
                         }
                         functions.append(func_data)
-                        print(f"DEBUG_CLANG_FUNCTION_ADDED: {signature}")
-                    else:
-                        print(f"DEBUG_CLANG_FUNCTION_REJECTED: {node.spelling} (signature: '{signature}', is_cvc5: {is_cvc5})")
+                        print(f"DEBUG_CVC5_FUNCTION: Found CVC5 function: {signature}")
+                    elif signature:
+                        print(f"DEBUG_NON_CVC5_FUNCTION: Rejected non-CVC5 function: {signature}")
                 
                 for child in node.get_children():
                     visit_node(child, depth + 1)
@@ -184,6 +182,12 @@ class CommitCoverageAnalyzer:
             visit_node(tu.cursor)
             
             print(f"DEBUG_CLANG: Parsing complete. Found {len(functions)} functions")
+            if functions:
+                print(f"DEBUG_CLANG_SAMPLE: Sample functions found:")
+                for i, func in enumerate(functions[:3]):  # Show first 3 functions
+                    print(f"DEBUG_CLANG_SAMPLE_{i}: {func['signature']}")
+                if len(functions) > 3:
+                    print(f"DEBUG_CLANG_SAMPLE: ... and {len(functions) - 3} more functions")
             
             return functions
             
@@ -236,8 +240,6 @@ class CommitCoverageAnalyzer:
             
             line = cursor.location.line
             signature = f"{qualified_name}({param_str}){abi_info}{const_suffix}:{line}"
-            
-            print(f"DEBUG_SIGNATURE: Generated '{signature}'")
             return signature
         except Exception as e:
             print(f"DEBUG_SIGNATURE_ERROR: Error generating signature: {e}")
@@ -370,6 +372,21 @@ class CommitCoverageAnalyzer:
         print(f"DEBUG_COVERAGE_SAMPLE_KEYS: Sample coverage mapping keys:")
         for i, key in enumerate(sample_keys):
             print(f"DEBUG_COVERAGE_KEY_{i}: '{key}' -> {len(self.coverage_map[key])} tests")
+        
+        # Show key format analysis
+        key_formats = {}
+        for key in list(self.coverage_map.keys())[:100]:  # Analyze first 100 keys
+            if ':' in key:
+                parts = key.split(':')
+                if len(parts) >= 3:
+                    format_key = f"{len(parts)}_parts"
+                    if format_key not in key_formats:
+                        key_formats[format_key] = 0
+                    key_formats[format_key] += 1
+        
+        print(f"DEBUG_COVERAGE_FORMATS: Key format analysis:")
+        for format_type, count in sorted(key_formats.items()):
+            print(f"DEBUG_COVERAGE_FORMAT: {format_type}: {count} keys")
     
     def find_tests_for_functions(self, functions: List[str]) -> Dict:
         """Find unique tests that cover the given functions."""
@@ -389,6 +406,13 @@ class CommitCoverageAnalyzer:
         print(f"DEBUG_MATCHING: Finding tests for {len(functions)} functions...")
         print(f"DEBUG_MATCHING: Coverage map has {len(self.coverage_map)} entries")
         
+        # Show sample functions we're trying to match
+        print(f"DEBUG_MATCHING_SAMPLE_FUNCTIONS: Sample functions to match:")
+        for i, func in enumerate(functions[:3]):  # Show first 3 functions
+            print(f"DEBUG_MATCHING_FUNC_{i}: '{func}'")
+        if len(functions) > 3:
+            print(f"DEBUG_MATCHING_FUNC_MORE: ... and {len(functions) - 3} more functions")
+        
         all_covering_tests = set()
         functions_with_tests = 0
         functions_without_tests = 0
@@ -407,6 +431,7 @@ class CommitCoverageAnalyzer:
                 matching_tests.update(tests)
                 match_type = "direct"
                 direct_matches += 1
+                print(f"DEBUG_MATCHING_DIRECT_SUCCESS: Direct match found for '{func}' -> {len(tests)} tests")
             else:
                 # Strategy 2: Try matching without path (remove file path from our function)
                 if ':' in func:
@@ -425,6 +450,7 @@ class CommitCoverageAnalyzer:
                                     matching_tests.update(tests)
                                     match_type = "path_removed"
                                     path_removed_matches += 1
+                                    print(f"DEBUG_MATCHING_PATH_SUCCESS: Path-removed match found for '{func}' -> '{coverage_key}' -> {len(tests)} tests")
                                     break  # Found match without path
             
             if matching_tests:
