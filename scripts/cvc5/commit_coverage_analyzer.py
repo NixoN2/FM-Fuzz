@@ -300,63 +300,191 @@ class CommitCoverageAnalyzer:
         return True
     
     def get_commit_functions(self, commit_hash: str) -> List[str]:
-        """Get changed functions from a commit"""
+        """Get changed C++ functions by intersecting diff ranges with AST extents.
+        Includes functions whose body overlaps changed lines or whose signature changed.
+        Excludes pure moves (identical normalized body before/after).
+        """
         print(f"Analyzing commit {commit_hash}...")
-        
-        # Get commit info
+
         commit_info = self.get_commit_info(commit_hash)
         if not commit_info:
             return []
-        
         print(f"Commit: {commit_info['summary']}")
         print(f"Author: {commit_info['author_name']}")
-        
-        # Get diff and changed lines
+
+        # Get diff and changed line ranges on the new side
         diff_text = self.get_commit_diff(commit_hash)
         changed_files_lines = self.get_changed_lines(diff_text)
-        
-        changed_functions = []
-        
+
+        # Parent commit (if any)
+        try:
+            commit = self.repo.commit(commit_hash)
+            parent_hash = commit.parents[0].hexsha if commit.parents else None
+        except Exception:
+            parent_hash = None
+
+        changed_functions: List[str] = []
+
         for file_path, changed_lines in changed_files_lines.items():
             if not file_path.endswith(('.cpp', '.cc', '.c', '.h', '.hpp')):
                 continue
-            
-            full_path = self.repo_path / file_path
-            if not full_path.exists():
+
+            print(f"  Analyzing {file_path} (changed lines: {len(changed_lines)})")
+
+            after_src = self.get_file_text_at_commit(commit_hash, file_path)
+            if after_src is None:
                 continue
-            
-            print(f"  Analyzing {file_path} (changed lines: {sorted(list(changed_lines))[:10]}{'...' if len(changed_lines) > 10 else ''})")
-            
-            # Extract functions from the changed file
-            functions = self.extract_functions_with_clang(str(full_path))
-            
-            # Find functions near changed lines
-            for func in functions:
-                func_line = func['line']
-                if any(abs(func_line - changed_line) <= 20 for changed_line in changed_lines):
-                    mapping_entry = f"{file_path}:{func['signature']}"
-                    changed_functions.append(mapping_entry)
-                    print(f"    Found: {mapping_entry}")
-            
-            # Also analyze corresponding header files for .cpp files
-            if file_path.endswith(('.cpp', '.cc', '.c')):
-                # Look for corresponding .h file
-                base_name = file_path.rsplit('.', 1)[0]
-                header_file = base_name + '.h'
-                header_path = self.repo_path / header_file
-                
-                if header_path.exists():
-                    print(f"  Also analyzing header {header_file}")
-                    header_functions = self.extract_functions_with_clang(str(header_path))
-                    
-                    # For header files, include all functions (they're often templates/inline)
-                    for func in header_functions:
-                        mapping_entry = f"{header_file}:{func['signature']}"
-                        changed_functions.append(mapping_entry)
-                        print(f"    Found: {mapping_entry}")
-        
+            before_src = self.get_file_text_at_commit(parent_hash, file_path) if parent_hash else None
+
+            # Parse functions from in-memory contents
+            after_funcs = self.parse_functions_from_text(file_path, after_src)
+            before_funcs = self.parse_functions_from_text(file_path, before_src) if before_src is not None else []
+
+            # Build indexes for before
+            before_by_sig = {self.build_signature_key(f['signature']): f for f in before_funcs}
+            def base_name(sig: str) -> str:
+                try:
+                    return sig.split('(')[0].split('::')[-1]
+                except Exception:
+                    return sig
+            before_by_base: Dict[str, List[Dict]] = {}
+            for bf in before_funcs:
+                before_by_base.setdefault(base_name(bf['signature']), []).append(bf)
+
+            # Helper to normalize function body slice
+            def normalized_body(src: str, f: Dict) -> str:
+                lines = src.splitlines()
+                s = max(1, int(f['start']))
+                e = min(len(lines), int(f['end']))
+                snippet = "\n".join(lines[s-1:e])
+                return self.normalize_code(snippet)
+
+            for f in after_funcs:
+                sig = f['signature']
+                if not self.is_cvc5_function(sig):
+                    continue
+
+                # Body overlap check
+                overlaps = any((f['start'] <= ln <= f['end']) for ln in changed_lines)
+
+                # Signature change check
+                sig_key = self.build_signature_key(sig)
+                existed_before = sig_key in before_by_sig
+                sig_changed = False
+                if not existed_before and before_funcs:
+                    bn = base_name(sig)
+                    if bn in before_by_base and before_by_base[bn]:
+                        sig_changed = True
+
+                if not overlaps and not sig_changed:
+                    continue
+
+                # Exclude pure moves (identical body before/after when same signature existed)
+                if before_src is not None and existed_before and not sig_changed:
+                    bf = before_by_sig[sig_key]
+                    if normalized_body(before_src, bf) == normalized_body(after_src, f):
+                        continue
+
+                mapping_entry = f"{file_path}:{sig}"
+                changed_functions.append(mapping_entry)
+                print(f"    Selected: {mapping_entry} (overlap={overlaps}, sig_changed={sig_changed})")
+
         print(f"Found {len(changed_functions)} changed functions")
         return changed_functions
+
+    def get_file_text_at_commit(self, rev: Optional[str], path: str) -> Optional[str]:
+        """Return file contents at a given revision without checking out."""
+        if not rev:
+            return None
+        try:
+            result = subprocess.run(['git', 'show', f'{rev}:{path}'], capture_output=True, text=True, cwd=self.repo_path)
+            if result.returncode != 0:
+                return None
+            return result.stdout
+        except Exception:
+            return None
+
+    def parse_functions_from_text(self, file_path: str, source_text: Optional[str]) -> List[Dict]:
+        """Parse C++ function definitions from provided source text using libclang unsaved_files."""
+        if not CLANG_AVAILABLE or source_text is None:
+            return []
+        try:
+            index = clang.cindex.Index.create()
+            args = [
+                '-x', 'c++',
+                '-std=c++17',
+                '-I./include',
+                '-I./build/include',
+                '-I./src/include',
+                '-I./src/.',
+                '-I./build/src',
+                '-isystem', './build/deps/include',
+                '-I/usr/include',
+                '-I/usr/include/c++/11',
+                '-I/usr/include/x86_64-linux-gnu/c++/11',
+                '-I/usr/include/c++/11/x86_64-linux-gnu',
+                '-I/usr/local/include',
+                '-DCVC5_ASSERTIONS',
+                '-DCVC5_DEBUG',
+                '-DCVC5_STATISTICS_ON',
+                '-DCVC5_TRACING',
+                '-DCVC5_USE_POLY',
+                '-D__BUILDING_CVC5LIB',
+                '-Dcvc5_obj_EXPORTS',
+                '-Wall',
+                '-Wsuggest-override',
+                '-Wnon-virtual-dtor',
+                '-Wimplicit-fallthrough',
+                '-Wshadow',
+                '-fno-operator-names',
+                '-fno-extern-tls-init',
+                '-Wno-deprecated-declarations',
+                '-Wno-error=deprecated-declarations',
+                '-fPIC',
+                '-fvisibility=default',
+                '-fparse-all-comments',
+                '-Wno-unknown-pragmas',
+                '-Wno-unused-parameter',
+                '-Wno-unused-variable',
+                '-Wno-unused-function'
+            ]
+
+            tu = index.parse(file_path, args=args, unsaved_files=[(file_path, source_text)])
+
+            funcs: List[Dict] = []
+
+            def visit(n):
+                if n.kind in [clang.cindex.CursorKind.FUNCTION_DECL, clang.cindex.CursorKind.CXX_METHOD] and n.is_definition():
+                    sig = self.get_function_signature(n)
+                    if sig and self.is_cvc5_function(sig):
+                        funcs.append({
+                            'signature': sig,
+                            'start': n.extent.start.line,
+                            'end': n.extent.end.line,
+                            'file': file_path
+                        })
+                for c in n.get_children():
+                    visit(c)
+
+            visit(tu.cursor)
+            return funcs
+        except Exception:
+            return []
+
+    def build_signature_key(self, signature: str) -> str:
+        """Normalize a signature to a stable key (drop ':line')."""
+        if ':' in signature:
+            base, last = signature.rsplit(':', 1)
+            if last.isdigit():
+                return base
+        return signature
+
+    def normalize_code(self, code: str) -> str:
+        """Remove comments and collapse whitespace for rough body comparison."""
+        code = re.sub(r'//.*', '', code)
+        code = re.sub(r'/\*.*?\*/', '', code, flags=re.S)
+        code = re.sub(r'\s+', ' ', code).strip()
+        return code
     
     def load_coverage_mapping(self, coverage_json_path: str):
         """Load coverage mapping only when needed."""
