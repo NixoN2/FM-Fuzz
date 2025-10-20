@@ -182,13 +182,7 @@ class CommitCoverageAnalyzer:
                 '-I./build/src',                  # Build source directory
                 '-isystem', './build/deps/include',  # Dependencies
                 
-                # System include paths for Linux
-                '-I/usr/include',
-                '-I/usr/include/c++/11',
-                '-I/usr/include/x86_64-linux-gnu/c++/11',
-                '-I/usr/include/c++/11/x86_64-linux-gnu',
-                '-isystem', '/usr/include/x86_64-linux-gnu',
-                '-I/usr/local/include',
+                # System include paths will be discovered dynamically
                 
                 # CVC5-specific preprocessor definitions
                 '-DCVC5_ASSERTIONS',
@@ -219,16 +213,16 @@ class CommitCoverageAnalyzer:
                 '-Wno-unused-function'
             ]
 
-            # Try to discover Linux GCC/libstdc++ include directories dynamically
+            # Add ALL discovered includes (this will include /usr/include + C++ paths)
             args.extend(self._discover_linux_includes())
-            # Add verbose g++ discovered system include paths
             args.extend(self._discover_gcc_verbose_includes())
+            
             # Add clang resource directory if available
             crd = self._clang_resource_dir()
             if crd:
                 args.extend(['-resource-dir', crd])
             
-            print(f"DEBUG_CLANG: Parsing with args: {' '.join(args[:10])}... (showing first 10)")
+            print(f"DEBUG_FINAL_ARGS: {len(args)} args, includes: {args[-20:]}")  # Show last 20 (includes)
             
             tu = index.parse(file_path, args=args)
             
@@ -406,28 +400,55 @@ class CommitCoverageAnalyzer:
                 return ''
 
     def _discover_gcc_verbose_includes(self) -> List[str]:
-        """Parse g++ verbose include search list and return -isystem dirs."""
+        """Parse g++ verbose include search list and return -isystem dirs. FIXED VERSION."""
         paths: List[str] = []
         try:
-            proc = subprocess.run(['g++', '-E', '-x', 'c++', '-', '-v'], input='', text=True, capture_output=True)
-            out = proc.stderr or proc.stdout
+            proc = subprocess.run(['g++', '-E', '-x', 'c++', '-', '-v'], 
+                                input='', text=True, capture_output=True)
+            out = proc.stderr.decode('utf-8', errors='ignore') if proc.stderr else proc.stdout.decode('utf-8', errors='ignore')
             if not out:
                 return []
+            
             lines = out.splitlines()
-            start = False
-            for ln in lines:
-                if 'search starts here:' in ln:
-                    start = True
+            start_search = False
+            end_search = False
+            
+            for line in lines:
+                line = line.strip()
+                if '#include <...> search starts here:' in line:
+                    start_search = True
                     continue
-                if start:
-                    if 'End of search list.' in ln:
-                        break
-                    p = ln.strip()
-                    if p and os.path.isdir(p):
-                        paths.extend(['-isystem', p])
-        except Exception:
-            pass
-        return paths
+                if start_search and 'End of search list.' in line:
+                    end_search = True
+                    break
+                if start_search and not end_search:
+                    # Extract path (remove leading spaces and any trailing comments)
+                    path = line.split('#')[0].strip()
+                    if path and os.path.isdir(path):
+                        paths.append(path)
+                        print(f"DEBUG_INCLUDE_FOUND: {path}")
+            
+            # CRITICAL: Always add /usr/include manually as fallback
+            usr_include = '/usr/include'
+            if os.path.isdir(usr_include) and usr_include not in paths:
+                paths.append(usr_include)
+                print(f"DEBUG_INCLUDE_ADDED_FALLBACK: {usr_include}")
+                
+        except Exception as e:
+            print(f"DEBUG_INCLUDE_ERROR: {e}")
+            # Emergency fallback
+            fallback = ['/usr/include']
+            for p in fallback:
+                if os.path.isdir(p):
+                    paths.append(p)
+        
+        # Convert to -isystem flags
+        result = []
+        for p in paths:
+            result.extend(['-isystem', p])
+        
+        print(f"DEBUG_INCLUDE_PATHS: Found {len(paths)} include paths")
+        return result
 
     def _clang_resource_dir(self) -> Optional[str]:
         """Try to get clang resource dir for proper builtin headers."""
@@ -640,12 +661,7 @@ class CommitCoverageAnalyzer:
                 '-I./src/.',
                 '-I./build/src',
                 '-isystem', './build/deps/include',
-                '-I/usr/include',
-                '-I/usr/include/c++/11',
-                '-I/usr/include/x86_64-linux-gnu/c++/11',
-                '-I/usr/include/c++/11/x86_64-linux-gnu',
-                '-isystem', '/usr/include/x86_64-linux-gnu',
-                '-I/usr/local/include',
+                # System include paths will be discovered dynamically
                 '-DCVC5_ASSERTIONS',
                 '-DCVC5_DEBUG',
                 '-DCVC5_STATISTICS_ON',
@@ -670,14 +686,16 @@ class CommitCoverageAnalyzer:
                 '-Wno-unused-function'
             ]
 
-            # Add discovered Linux include directories
+            # Add ALL discovered includes (this will include /usr/include + C++ paths)
             args.extend(self._discover_linux_includes())
-            # Add verbose g++ discovered system include paths
             args.extend(self._discover_gcc_verbose_includes())
+            
             # Add clang resource directory if available
             crd = self._clang_resource_dir()
             if crd:
                 args.extend(['-resource-dir', crd])
+            
+            print(f"DEBUG_FINAL_ARGS: {len(args)} args, includes: {args[-20:]}")  # Show last 20 (includes)
 
             tu = index.parse(file_path, args=args, unsaved_files=[(file_path, source_text)])
             # Print diagnostics similar to extract_functions_with_clang for visibility
