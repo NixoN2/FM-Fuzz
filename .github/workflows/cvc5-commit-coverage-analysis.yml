@@ -14,17 +14,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
       
-      - name: Set up LLVM/Clang 17
-        id: llvm
-        uses: actions/setup-llvm@v1
+      - name: Install LLVM/Clang 17
+        uses: KyleMayes/install-llvm-action@v2
         with:
           version: '17'
 
       - name: Add LLVM to PATH
-        run: echo "${{ steps.llvm.outputs.llvm-path }}/bin" >> $GITHUB_PATH
+        run: echo "${{ env.LLVM_PATH }}/bin" >> $GITHUB_PATH
 
       - name: Export LIBCLANG_PATH
-        run: echo "LIBCLANG_PATH=${{ steps.llvm.outputs.llvm-path }}/lib" >> $GITHUB_ENV
+        run: echo "LIBCLANG_PATH=${{ env.LLVM_PATH }}/lib" >> $GITHUB_ENV
 
       - name: Verify Clang
         run: |
