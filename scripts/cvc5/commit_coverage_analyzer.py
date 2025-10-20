@@ -29,6 +29,9 @@ class CommitCoverageAnalyzer:
         self.repo_path = Path(repo_path)
         self.repo = git.Repo(repo_path)
         self.coverage_map = None
+        # Map from primary mapping entry (path:signature) to an alternative
+        # spelling-based signature mapping entry for debug-only matching.
+        self.alt_signature_map: Dict[str, str] = {}
     
     def get_commit_info(self, commit_hash: str) -> Optional[Dict]:
         """Get basic commit information"""
@@ -170,6 +173,9 @@ class CommitCoverageAnalyzer:
                 '-Wno-unused-variable',
                 '-Wno-unused-function'
             ]
+
+            # Try to discover Linux GCC/libstdc++ include directories dynamically
+            args.extend(self._discover_linux_includes())
             
             print(f"DEBUG_CLANG: Parsing with args: {' '.join(args[:10])}... (showing first 10)")
             
@@ -187,16 +193,20 @@ class CommitCoverageAnalyzer:
                 if node.kind in [clang.cindex.CursorKind.FUNCTION_DECL, 
                                clang.cindex.CursorKind.CXX_METHOD]:
                     signature = self.get_function_signature(node)
+                    alt_signature = self.get_function_signature_spelling(node)
                     is_cvc5 = self.is_cvc5_function(signature) if signature else False
                     
                     if signature and is_cvc5:
                         func_data = {
                             'signature': signature,
+                            'alt_signature': alt_signature,
                             'line': node.location.line,
                             'file': file_path
                         }
                         functions.append(func_data)
                         print(f"DEBUG_CVC5_FUNCTION: Found CVC5 function: {signature}")
+                        if alt_signature and alt_signature != signature:
+                            print(f"DEBUG_CVC5_FUNCTION_ALT: Alt signature: {alt_signature}")
                 
                 for child in node.get_children():
                     visit_node(child, depth + 1)
@@ -266,6 +276,38 @@ class CommitCoverageAnalyzer:
             return signature
         except Exception as e:
             print(f"DEBUG_SIGNATURE_ERROR: Error generating signature: {e}")
+            return None
+
+    def get_function_signature_spelling(self, cursor) -> Optional[str]:
+        """Alternative signature that prefers type.spelling to preserve templates.
+        Debug-only; not used for matching.
+        """
+        try:
+            name = cursor.spelling
+            if not name:
+                return None
+
+            qualified_name = self.get_qualified_name(cursor)
+            params = []
+            for child in cursor.get_children():
+                if child.kind == clang.cindex.CursorKind.PARM_DECL:
+                    t = child.type
+                    # Prefer the original spelling to preserve templates like std::vector<...>
+                    param_type = t.spelling or t.get_canonical().spelling
+                    # Light whitespace cleanup only
+                    param_type = param_type.replace("  ", " ").strip()
+                    params.append(param_type)
+
+            param_str = ", ".join(params)
+            const_suffix = " const" if cursor.is_const_method() else ""
+            abi_info = ""
+            if hasattr(cursor, 'mangled_name') and cursor.mangled_name:
+                if 'abi:cxx11' in str(cursor.mangled_name):
+                    abi_info = "[abi:cxx11]"
+            line = cursor.location.line
+            signature = f"{qualified_name}({param_str}){abi_info}{const_suffix}:{line}"
+            return signature
+        except Exception as e:
             return None
     
     def get_qualified_name(self, cursor) -> str:
@@ -404,6 +446,13 @@ class CommitCoverageAnalyzer:
                 mapping_entry = f"{file_path}:{f['signature']}"
                 changed_functions.append(mapping_entry)
                 print(f"    Selected: {mapping_entry} (overlap=True, sig_changed=False)")
+                # Record alternative signature for debug-only matching later
+                alt_sig = f.get('alt_signature')
+                if alt_sig:
+                    alt_entry = f"{file_path}:{alt_sig}"
+                    self.alt_signature_map[mapping_entry] = alt_entry
+                    if alt_sig != f['signature']:
+                        print(f"    Selected ALT (debug-only): {alt_entry}")
 
         print(f"Found {len(changed_functions)} changed functions")
         return changed_functions
@@ -465,6 +514,9 @@ class CommitCoverageAnalyzer:
                 '-Wno-unused-function'
             ]
 
+            # Add discovered Linux include directories
+            args.extend(self._discover_linux_includes())
+
             tu = index.parse(file_path, args=args, unsaved_files=[(file_path, source_text)])
 
             funcs: List[Dict] = []
@@ -472,6 +524,7 @@ class CommitCoverageAnalyzer:
             def visit(n):
                 if n.kind in [clang.cindex.CursorKind.FUNCTION_DECL, clang.cindex.CursorKind.CXX_METHOD] and n.is_definition():
                     sig = self.get_function_signature(n)
+                    alt_sig = self.get_function_signature_spelling(n)
                     # Only keep functions physically defined in this file (exclude headers and system files)
                     node_file = str(n.location.file) if n.location and n.location.file else None
                     if sig and node_file and self.is_cvc5_function(sig):
@@ -482,6 +535,7 @@ class CommitCoverageAnalyzer:
                         if nf.endswith(exp):
                             funcs.append({
                                 'signature': sig,
+                                'alt_signature': alt_sig,
                                 'start': n.extent.start.line,
                                 'end': n.extent.end.line,
                                 'file': node_file
@@ -649,6 +703,36 @@ class CommitCoverageAnalyzer:
                             print(f"DEBUG_MATCHING_FUZZY_SUCCESS: '{func}' -> '{best_sig}' ratio={best_ratio:.2f} tests={len(tests)}")
                     except Exception:
                         pass
+                    # Debug-only: if still no matches, try the alternative signature (spelling)
+                    if not matching_tests and func in self.alt_signature_map:
+                        alt_func = self.alt_signature_map[func]
+                        alt_path, alt_sig = split_path_and_sig(alt_func)
+                        alt_full_norm = normalize_to_compare(f"{alt_path}:{alt_sig}")
+                        alt_sig_norm = normalize_to_compare(alt_sig)
+                        alt_tests = set()
+                        alt_type = "none"
+                        if alt_full_norm in cov_full_to_tests:
+                            alt_tests = cov_full_to_tests[alt_full_norm]
+                            alt_type = "direct"
+                        elif alt_sig_norm in cov_sig_to_tests:
+                            alt_tests = cov_sig_to_tests[alt_sig_norm]
+                            alt_type = "path_removed"
+                        else:
+                            try:
+                                import difflib
+                                best = max(
+                                    ((cov_sig, difflib.SequenceMatcher(None, alt_sig_norm, cov_sig).ratio()) for cov_sig in cov_sigs_list),
+                                    key=lambda x: x[1],
+                                    default=(None, 0.0)
+                                )
+                                best_sig, best_ratio = best
+                                if best_sig is not None and best_ratio >= 0.95:
+                                    alt_tests = cov_sig_to_tests.get(best_sig, set())
+                                    alt_type = f"fuzzy:{best_ratio:.2f}"
+                            except Exception:
+                                pass
+                        if alt_tests:
+                            print(f"DEBUG_ALT_MATCH_WOULD_HAVE: '{func}' => alt '{alt_func}' ({alt_type}) -> {len(alt_tests)} tests")
             
             if matching_tests:
                 all_covering_tests.update(matching_tests)
@@ -686,24 +770,102 @@ class CommitCoverageAnalyzer:
         }
     
     def normalize_function_signature(self, func_sig: str) -> str:
-        """Normalize function signature by standardizing const placement."""
-        # Replace "const Type&" with "Type const&" and "const Type*" with "Type const*"
+        """Normalize function signature by standardizing const placement.
+        Robust for template types and spacing.
+        """
         import re
-        
-        # Pattern to match "const " followed by a type name
-        # This handles cases like "const cvc5::internal::LogicInfo&" -> "cvc5::internal::LogicInfo const&"
-        pattern = r'const\s+([a-zA-Z_][a-zA-Z0-9_:]*\s*[&\*])'
-        
-        def replace_const(match):
-            type_part = match.group(1)
-            if '&' in type_part:
-                return type_part.replace('&', ' const&')
-            elif '*' in type_part:
-                return type_part.replace('*', ' const*')
-            return type_part + ' const'
-        
-        normalized = re.sub(pattern, replace_const, func_sig)
-        return normalized
+
+        try:
+            # Split the signature into prefix, parameter list, and suffix
+            # Example: ns::Cls::f(T1, T2):123
+            m = re.match(r'^(.*?\()(.+?)(\).*)$', func_sig)
+            if not m:
+                return func_sig
+            prefix, params_str, suffix = m.group(1), m.group(2), m.group(3)
+
+            # Split params by commas while respecting angle bracket depth
+            params = []
+            buf = []
+            depth = 0
+            for ch in params_str:
+                if ch == '<':
+                    depth += 1
+                elif ch == '>':
+                    depth = max(0, depth - 1)
+                if ch == ',' and depth == 0:
+                    params.append(''.join(buf).strip())
+                    buf = []
+                else:
+                    buf.append(ch)
+            if buf:
+                params.append(''.join(buf).strip())
+
+            def normalize_param(p: str) -> str:
+                # Collapse internal whitespace
+                p = re.sub(r'\s+', ' ', p).strip()
+                # Detect leading const
+                has_leading_const = p.startswith('const ')
+                if has_leading_const:
+                    p = p[len('const '):].strip()
+                # Extract trailing ref/pointer symbols
+                m2 = re.match(r'^(.*?)(\s*[&*]+)$', p)
+                if m2:
+                    base = m2.group(1).strip()
+                    syms = m2.group(2).replace(' ', '')
+                else:
+                    base = p
+                    syms = ''
+                if has_leading_const:
+                    p = f"{base} const{syms}"
+                else:
+                    p = f"{base}{syms}"
+                # Remove spaces before & and *
+                p = re.sub(r"\s+([&*])", r"\1", p)
+                return p
+
+            norm_params = [normalize_param(p) for p in params if p != '']
+            norm_params_str = ', '.join(norm_params)
+            normalized = f"{prefix}{norm_params_str}{suffix}"
+            return normalized
+        except Exception:
+            return func_sig
+
+    def _discover_linux_includes(self) -> List[str]:
+        """Discover generic Linux GCC/libstdc++ include directories for libclang parsing."""
+        includes: List[str] = []
+        try:
+            def out(cmd: List[str]) -> str:
+                res = subprocess.run(cmd, capture_output=True, text=True)
+                return res.stdout.strip()
+
+            dumpver = out(['g++', '-dumpversion']) or ''
+            dumpmach = out(['g++', '-dumpmachine']) or ''
+            gcc_inc = out(['g++', '-print-file-name=include'])
+            candidates = set()
+            # Direct GCC include dir
+            if gcc_inc and os.path.isdir(gcc_inc):
+                candidates.add(gcc_inc)
+            # Common libstdc++ layouts
+            if dumpver:
+                candidates.add(f"/usr/include/c++/{dumpver}")
+                if dumpmach:
+                    candidates.add(f"/usr/include/{dumpmach}/c++/{dumpver}")
+            # Backward headers
+            if dumpver:
+                candidates.add(f"/usr/include/c++/{dumpver}/backward")
+            # Machine-specific
+            if dumpmach:
+                candidates.add(f"/usr/include/{dumpmach}")
+            # Generic
+            candidates.add('/usr/include')
+            candidates.add('/usr/local/include')
+
+            for p in sorted(candidates):
+                if os.path.isdir(p):
+                    includes.extend(['-isystem', p])
+        except Exception:
+            pass
+        return includes
     
     def cleanup_coverage_mapping(self):
         """Clean up coverage mapping from memory."""
