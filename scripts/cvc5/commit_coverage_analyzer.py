@@ -193,7 +193,14 @@ class CommitCoverageAnalyzer:
                 if node.kind in [clang.cindex.CursorKind.FUNCTION_DECL, 
                                clang.cindex.CursorKind.CXX_METHOD]:
                     signature = self.get_function_signature(node)
+                    # Prefer spelling; if it looks degraded (e.g., 'int'), try textual tokens
                     alt_signature = self.get_function_signature_spelling(node)
+                    if alt_signature and '(' in alt_signature and ')' in alt_signature:
+                        # Heuristic: if the alt has isolated primitive params where tokens suggest templates/namespaces,
+                        # reconstruct params from tokens
+                        alt_sig_tokens = self.get_function_signature_textual(node)
+                        if alt_sig_tokens:
+                            alt_signature = alt_sig_tokens
                     is_cvc5 = self.is_cvc5_function(signature) if signature else False
                     
                     if signature and is_cvc5:
@@ -308,6 +315,37 @@ class CommitCoverageAnalyzer:
             signature = f"{qualified_name}({param_str}){abi_info}{const_suffix}:{line}"
             return signature
         except Exception as e:
+            return None
+
+    def get_function_signature_textual(self, cursor) -> Optional[str]:
+        """Alternative signature using tokens to preserve complex template types from the source."""
+        try:
+            qualified_name = self.get_qualified_name(cursor)
+            params = []
+            for child in cursor.get_children():
+                if child.kind == clang.cindex.CursorKind.PARM_DECL:
+                    tokens = list(child.get_tokens())
+                    if not tokens:
+                        continue
+                    text = " ".join(t.spelling for t in tokens)
+                    # Remove default initializers
+                    if '=' in text:
+                        text = text.split('=')[0].strip()
+                    # Remove parameter identifier at the end (best-effort)
+                    name = child.spelling or ''
+                    if name:
+                        # remove last occurrence of name as a whole word
+                        import re
+                        text = re.sub(r"\b" + re.escape(name) + r"\b\s*$", "", text).strip()
+                    # Collapse spaces
+                    import re as _re
+                    text = _re.sub(r"\s+", " ", text).strip()
+                    params.append(text)
+            param_str = ", ".join(params)
+            const_suffix = " const" if cursor.is_const_method() else ""
+            line = cursor.location.line
+            return f"{qualified_name}({param_str}){const_suffix}:{line}"
+        except Exception:
             return None
     
     def get_qualified_name(self, cursor) -> str:
@@ -525,6 +563,11 @@ class CommitCoverageAnalyzer:
                 if n.kind in [clang.cindex.CursorKind.FUNCTION_DECL, clang.cindex.CursorKind.CXX_METHOD] and n.is_definition():
                     sig = self.get_function_signature(n)
                     alt_sig = self.get_function_signature_spelling(n)
+                    # Try textual reconstruction if needed
+                    if alt_sig and '(' in alt_sig and ')' in alt_sig:
+                        alt_sig_tokens = self.get_function_signature_textual(n)
+                        if alt_sig_tokens:
+                            alt_sig = alt_sig_tokens
                     # Only keep functions physically defined in this file (exclude headers and system files)
                     node_file = str(n.location.file) if n.location and n.location.file else None
                     if sig and node_file and self.is_cvc5_function(sig):
