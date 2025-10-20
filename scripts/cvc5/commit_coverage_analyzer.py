@@ -224,6 +224,17 @@ class CommitCoverageAnalyzer:
             
             print(f"DEBUG_FINAL_ARGS: {len(args)} args, includes: {args[-20:]}")  # Show last 20 (includes)
             
+            # Test if stdlib.h can be found with these args
+            try:
+                test_proc = subprocess.run(['clang++'] + args + ['-E', '-x', 'c++', '-'], 
+                                         input='#include <stdlib.h>', text=True, capture_output=True)
+                if test_proc.returncode == 0:
+                    print("DEBUG_STDLIB_TEST: ✅ stdlib.h found successfully")
+                else:
+                    print(f"DEBUG_STDLIB_TEST: ❌ stdlib.h test failed: {test_proc.stderr[:200]}")
+            except Exception as e:
+                print(f"DEBUG_STDLIB_TEST: ❌ stdlib.h test error: {e}")
+            
             tu = index.parse(file_path, args=args)
             
             # Debug: Check for parsing errors
@@ -405,7 +416,7 @@ class CommitCoverageAnalyzer:
         try:
             proc = subprocess.run(['g++', '-E', '-x', 'c++', '-', '-v'], 
                                 input='', text=True, capture_output=True)
-            out = proc.stderr.decode('utf-8', errors='ignore') if proc.stderr else proc.stdout.decode('utf-8', errors='ignore')
+            out = proc.stderr if proc.stderr else proc.stdout
             if not out:
                 return []
             
