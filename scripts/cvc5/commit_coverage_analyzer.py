@@ -341,8 +341,17 @@ class CommitCoverageAnalyzer:
                     if args:
                         return f"{base}<{', '.join(args)}>"
 
-            # Fallback to spelling then canonical
-            s = tp.spelling or tp.get_canonical().spelling
+            # Prefer fully-qualified canonical for non-templates; fallback to spelling
+            can = tp.get_canonical().spelling or ''
+            sp = tp.spelling or ''
+            # If canonical shows namespaces or templates, prefer it
+            if '::' in can or '<' in can:
+                s = can
+            elif '::' in sp or '<' in sp:
+                s = sp
+            else:
+                # last resort
+                s = can or sp
             s = (s or '').replace('  ', ' ').strip()
             return s
         except Exception:
