@@ -52,6 +52,24 @@ jobs:
           pip install gitpython unidiff "clang==17.0.6" "libclang==17.0.6"
       
       - name: Run commit coverage analysis
+        working-directory: cvc5
+        run: ${{ github.workspace }}/scripts/cvc5/run_commit_coverage_analysis.sh 15 ${{ github.workspace }}/scripts/cvc5/commit_coverage_analyzer.py ../coverage_mapping_merged.json
+
+      - name: Build signature dumper (LibTooling)
+        working-directory: cvc5
         run: |
-          cd cvc5
-          ${{ github.workspace }}/scripts/cvc5/run_commit_coverage_analysis.sh 15 ${{ github.workspace }}/scripts/cvc5/commit_coverage_analyzer.py ../coverage_mapping_merged.json
+          # Copy the tool source into this repo workspace to build against compile_commands.json
+          cp ${{ github.workspace }}/scripts/cpp/sig_dump.cpp ./sig_dump.cpp
+          # Build using installed LLVM/Clang
+          clang++ -std=c++17 $(llvm-config --cxxflags) sig_dump.cpp -o sig_dump $(llvm-config --ldflags --system-libs --libs clangTooling clangASTMatchers clangFrontend clangAST clangBasic)
+
+      - name: Run signature dumper on changed files (HEAD)
+        working-directory: cvc5
+        run: |
+          # Collect changed C/C++ files for HEAD commit in src/
+          CHANGED=$(git show --name-only --pretty=format: HEAD | grep '^src/.*\.[ch]p\{0,2\}$' || true)
+          if [ -n "$CHANGED" ]; then
+            ./sig_dump -p build $CHANGED | head -200
+          else
+            echo "No changed C/C++ files in HEAD to dump signatures for."
+          fi
