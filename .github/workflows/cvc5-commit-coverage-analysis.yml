@@ -85,7 +85,7 @@ jobs:
         working-directory: cvc5
         run: |
           # Copy the tool source into this repo workspace to build against compile_commands.json
-          cp ${{ github.workspace }}/scripts/cpp/sig_dump.cpp ./sig_dump.cpp
+          cp ${{ github.workspace }}/scripts/cvc5/sig_dump.cpp ./sig_dump.cpp
           # Build using installed LLVM/Clang
           clang++ -std=c++17 $(llvm-config --cxxflags) sig_dump.cpp -o sig_dump $(llvm-config --ldflags --system-libs --libs clangTooling clangASTMatchers clangFrontend clangAST clangBasic)
 
