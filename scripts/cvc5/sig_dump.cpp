@@ -27,9 +27,7 @@ llvm::cl::OptionCategory SigDumpCategory("sig-dump options");
 llvm::cl::list<std::string> FilterFiles(
     "files", llvm::cl::desc("Input source files to scan (space-separated)"),
     llvm::cl::ZeroOrMore, llvm::cl::Positional, llvm::cl::cat(SigDumpCategory));
-llvm::cl::opt<std::string> BuildPath(
-    "p", llvm::cl::desc("Build path containing compile_commands.json"),
-    llvm::cl::init(""), llvm::cl::cat(SigDumpCategory));
+// Note: Build path option '-p' is provided by CommonOptionsParser; don't re-register it here.
 
 class SigCollector : public MatchFinder::MatchCallback {
  public:
@@ -104,21 +102,7 @@ int main(int argc, const char** argv) {
   }
   CommonOptionsParser& OptionsParser = ExpectedParser.get();
 
-  std::string BuildDir = BuildPath.getValue();
-  std::unique_ptr<CompilationDatabase> OwnedDB;
-  const CompilationDatabase* DB = &OptionsParser.getCompilations();
-  if (!BuildDir.empty()) {
-    std::string Error;
-    auto Loaded = CompilationDatabase::loadFromDirectory(BuildDir, Error);
-    if (Loaded) {
-      OwnedDB = std::move(Loaded);
-      DB = OwnedDB.get();
-    } else {
-      llvm::errs() << "Warning: could not load compile_commands.json from '" << BuildDir
-                   << "': " << Error << "\n";
-    }
-  }
-  ClangTool Tool(*DB, OptionsParser.getSourcePathList());
+  ClangTool Tool(OptionsParser.getCompilations(), OptionsParser.getSourcePathList());
 
   std::set<std::string> filter;
   for (const auto& f : FilterFiles) filter.insert(f);
