@@ -12,6 +12,7 @@
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/Path.h>
 #include <iostream>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -104,21 +105,20 @@ int main(int argc, const char** argv) {
   CommonOptionsParser& OptionsParser = ExpectedParser.get();
 
   std::string BuildDir = BuildPath.getValue();
-  ClangTool Tool(OptionsParser.getCompilations(), OptionsParser.getSourcePathList());
+  std::unique_ptr<CompilationDatabase> OwnedDB;
+  const CompilationDatabase* DB = &OptionsParser.getCompilations();
   if (!BuildDir.empty()) {
-    // Reconstruct with specified build directory
-    CompilationDatabase* DB = nullptr;
     std::string Error;
-    auto DBPtr = CompilationDatabase::loadFromDirectory(BuildDir, Error);
-    if (DBPtr) {
-      std::vector<std::string> Sources = OptionsParser.getSourcePathList();
-      ClangTool TmpTool(*DBPtr, Sources);
-      Tool = std::move(TmpTool);
+    auto Loaded = CompilationDatabase::loadFromDirectory(BuildDir, Error);
+    if (Loaded) {
+      OwnedDB = std::move(Loaded);
+      DB = OwnedDB.get();
     } else {
       llvm::errs() << "Warning: could not load compile_commands.json from '" << BuildDir
                    << "': " << Error << "\n";
     }
   }
+  ClangTool Tool(*DB, OptionsParser.getSourcePathList());
 
   std::set<std::string> filter;
   for (const auto& f : FilterFiles) filter.insert(f);
