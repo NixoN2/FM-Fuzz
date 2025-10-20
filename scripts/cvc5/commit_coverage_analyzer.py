@@ -502,31 +502,25 @@ class CommitCoverageAnalyzer:
         return qualified_name
     
     def is_cvc5_function(self, signature: str) -> bool:
-        """Check if a function signature belongs to cvc5"""
-        if 'std::' in signature or signature.startswith('__') or '__gnu_cxx::' in signature:
-            return False
-        
-        func_name = signature.split('(')[0].split('::')[-1]
-        
-        if 'cvc5::' in signature:
-            return True
-        
-        if '<' in signature and '>' in signature:
-            return False
-        
-        c_lib_prefixes = ['wcs', 'isw', 'tow', 'wct', 'sched_', 'clock_', 'time', 'atof', 'atoi', 'atol', 'select', 'alloca']
-        if any(func_name.startswith(prefix) for prefix in c_lib_prefixes):
-            return False
-        
-        if len(func_name) <= 3 and func_name.islower():
-            return False
-        
-        if func_name.islower() and not any(c.isupper() for c in func_name):
-            if '::' in signature and not signature.startswith('std::'):
+        """Check if a function signature belongs to cvc5.
+        Only consider the qualified function name (before '('), allow std types in parameters.
+        """
+        try:
+            head = signature.split('(')[0]
+            # If the function itself is in std or gnu namespaces, skip
+            if head.startswith('std::') or head.startswith('__') or head.startswith('__gnu_cxx::'):
+                return False
+            # Include any functions within the cvc5 namespace
+            if 'cvc5::' in head:
                 return True
+            # Fallback: if it has a namespace and isn't std/gnu, accept
+            if '::' in head:
+                ns = head.split('::', 1)[0]
+                if ns and ns != 'std' and not ns.startswith('__') and ns != '__gnu_cxx':
+                    return True
             return False
-        
-        return True
+        except Exception:
+            return False
     
     def get_commit_functions(self, commit_hash: str) -> List[str]:
         """Get changed C++ functions by intersecting diff ranges with AST extents.
