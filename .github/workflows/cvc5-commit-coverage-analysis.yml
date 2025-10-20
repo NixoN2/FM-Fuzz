@@ -14,6 +14,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
       
+      - name: Set up LLVM/Clang 17
+        id: llvm
+        uses: actions/setup-llvm@v1
+        with:
+          version: '17'
+
+      - name: Add LLVM to PATH
+        run: echo "${{ steps.llvm.outputs.llvm-path }}/bin" >> $GITHUB_PATH
+
+      - name: Export LIBCLANG_PATH
+        run: echo "LIBCLANG_PATH=${{ steps.llvm.outputs.llvm-path }}/lib" >> $GITHUB_ENV
+
+      - name: Verify Clang
+        run: |
+          clang++ --version
+          clang -print-resource-dir
+      
       - name: Build CVC5 with coverage
         run: |
           ./scripts/cvc5/build.sh --coverage
@@ -33,7 +50,7 @@ jobs:
       
       - name: Install Python dependencies
         run: |
-          pip install gitpython unidiff libclang
+          pip install gitpython unidiff "clang==17.0.6" "libclang==17.0.6"
       
       - name: Run commit coverage analysis
         run: |

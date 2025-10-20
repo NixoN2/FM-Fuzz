@@ -23,6 +23,51 @@ except ImportError:
     CLANG_AVAILABLE = False
     print("Warning: clang.cindex not available. Install with: pip install libclang")
 
+# Monkey-patch: expose template argument introspection via libclang C API if missing
+if CLANG_AVAILABLE:
+    try:
+        # Some environments have Python bindings lacking these APIs; use ctypes if available
+        import ctypes
+        from ctypes.util import find_library
+
+        libname = find_library('clang')
+        if libname:
+            _libclang = ctypes.CDLL(libname)
+
+            # Use clang.cindex.CXType definition to ensure ABI compatibility
+            CXType = clang.cindex.CXType  # type: ignore
+
+            # Function prototypes
+            _libclang.clang_Type_getNumTemplateArguments.argtypes = [CXType]
+            _libclang.clang_Type_getNumTemplateArguments.restype = ctypes.c_int
+
+            _libclang.clang_Type_getTemplateArgumentAsType.argtypes = [CXType, ctypes.c_uint]
+            _libclang.clang_Type_getTemplateArgumentAsType.restype = CXType
+
+            def _get_num_template_arguments(t):
+                try:
+                    return _libclang.clang_Type_getNumTemplateArguments(t._type)
+                except Exception:
+                    return -1
+
+            def _get_template_argument_type(t, idx: int):
+                try:
+                    cxt = _libclang.clang_Type_getTemplateArgumentAsType(t._type, ctypes.c_uint(idx))
+                    # Wrap returned CXType into a clang.cindex.Type
+                    if hasattr(clang.cindex, 'Type') and hasattr(clang.cindex.Type, 'from_result'):
+                        return clang.cindex.Type.from_result(cxt)  # type: ignore
+                    return t
+                except Exception:
+                    return t
+
+            # Attach if not present
+            if not hasattr(clang.cindex.Type, 'get_num_template_arguments'):
+                clang.cindex.Type.get_num_template_arguments = _get_num_template_arguments  # type: ignore
+            if not hasattr(clang.cindex.Type, 'get_template_argument_type'):
+                clang.cindex.Type.get_template_argument_type = _get_template_argument_type  # type: ignore
+    except Exception:
+        pass
+
 class CommitCoverageAnalyzer:
     def __init__(self, repo_path: str = "."):
         """Initialize with repository path."""
@@ -641,6 +686,14 @@ class CommitCoverageAnalyzer:
                 args.extend(['-resource-dir', crd])
 
             tu = index.parse(file_path, args=args, unsaved_files=[(file_path, source_text)])
+            # Print diagnostics similar to extract_functions_with_clang for visibility
+            try:
+                if tu.diagnostics:
+                    print(f"DEBUG_CLANG_TU_DIAG_COUNT: {len(tu.diagnostics)}")
+                    for diag in tu.diagnostics:
+                        print(f"DEBUG_CLANG_TU_DIAG: {diag.severity}: {diag.spelling}")
+            except Exception:
+                pass
 
             funcs: List[Dict] = []
 
@@ -761,6 +814,14 @@ class CommitCoverageAnalyzer:
             base = re.sub(r",\s*", ", ", base)
             # Collapse whitespace
             base = re.sub(r"\s+", " ", base).strip()
+            # Expand STL defaults for better matching: vector<T> -> vector<T, allocator<T>>
+            try:
+                def expand_vector(m):
+                    inner = m.group(1).strip()
+                    return f"std::vector<{inner}, std::allocator<{inner}> >"
+                base = re.sub(r"std::vector<([^,>]+)>", expand_vector, base)
+            except Exception:
+                pass
             return base
 
         # Precompute normalized coverage lookup maps
