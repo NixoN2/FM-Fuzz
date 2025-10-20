@@ -176,6 +176,12 @@ class CommitCoverageAnalyzer:
 
             # Try to discover Linux GCC/libstdc++ include directories dynamically
             args.extend(self._discover_linux_includes())
+            # Add verbose g++ discovered system include paths
+            args.extend(self._discover_gcc_verbose_includes())
+            # Add clang resource directory if available
+            crd = self._clang_resource_dir()
+            if crd:
+                args.extend(['-resource-dir', crd])
             
             print(f"DEBUG_CLANG: Parsing with args: {' '.join(args[:10])}... (showing first 10)")
             
@@ -247,26 +253,10 @@ class CommitCoverageAnalyzer:
             qualified_name = self.get_qualified_name(cursor)
             params = []
             
-            # Get parameters with more detailed type information
+            # Get parameters with template-aware rendering (best effort)
             for child in cursor.get_children():
                 if child.kind == clang.cindex.CursorKind.PARM_DECL:
-                    t = child.type
-                    # Use the canonical type for better accuracy
-                    param_type = t.get_canonical().spelling
-                    
-                    # Handle const qualification more carefully
-                    if t.is_const_qualified():
-                        # Move const to the right position
-                        if "&" in param_type:
-                            param_type = param_type.replace("const ", "").replace("&", " const&")
-                        elif "*" in param_type:
-                            param_type = param_type.replace("const ", "").replace("*", " const*")
-                        else:
-                            param_type = param_type.replace("const ", "") + " const"
-                    
-                    # Clean up spacing
-                    param_type = param_type.replace("  ", " ").strip()
-                    params.append(param_type)
+                    params.append(self._render_param_type(child.type))
 
             param_str = ", ".join(params)
             const_suffix = " const" if cursor.is_const_method() else ""
@@ -316,6 +306,86 @@ class CommitCoverageAnalyzer:
             return signature
         except Exception as e:
             return None
+
+    def _render_param_type(self, tp) -> str:
+        """Render parameter type with template arguments where possible using libclang APIs.
+        Falls back to canonical spelling.
+        """
+        try:
+            # Prefer named/elaborated named type for better spelling
+            try:
+                named = tp.get_named_type()
+                if named.spelling:
+                    tp = named
+            except Exception:
+                pass
+
+            # libclang python bindings may expose num_template_arguments
+            num_targs = getattr(tp, 'get_num_template_arguments', None)
+            get_targ = getattr(tp, 'get_template_argument_type', None)
+            if callable(num_targs) and callable(get_targ):
+                n = num_targs()
+                if isinstance(n, int) and n > 0:
+                    # Render base name
+                    base = tp.spelling or tp.get_canonical().spelling
+                    base = base.split('<', 1)[0].strip()
+                    # Collect arguments
+                    args: List[str] = []
+                    for i in range(n):
+                        try:
+                            at = get_targ(i)
+                            if at and (at.spelling or at.get_canonical().spelling):
+                                args.append(self._render_param_type(at))
+                        except Exception:
+                            pass
+                    if args:
+                        return f"{base}<{', '.join(args)}>"
+
+            # Fallback to spelling then canonical
+            s = tp.spelling or tp.get_canonical().spelling
+            s = (s or '').replace('  ', ' ').strip()
+            return s
+        except Exception:
+            try:
+                return tp.spelling or tp.get_canonical().spelling or ''
+            except Exception:
+                return ''
+
+    def _discover_gcc_verbose_includes(self) -> List[str]:
+        """Parse g++ verbose include search list and return -isystem dirs."""
+        paths: List[str] = []
+        try:
+            proc = subprocess.run(['g++', '-E', '-x', 'c++', '-', '-v'], input='', text=True, capture_output=True)
+            out = proc.stderr or proc.stdout
+            if not out:
+                return []
+            lines = out.splitlines()
+            start = False
+            for ln in lines:
+                if 'search starts here:' in ln:
+                    start = True
+                    continue
+                if start:
+                    if 'End of search list.' in ln:
+                        break
+                    p = ln.strip()
+                    if p and os.path.isdir(p):
+                        paths.extend(['-isystem', p])
+        except Exception:
+            pass
+        return paths
+
+    def _clang_resource_dir(self) -> Optional[str]:
+        """Try to get clang resource dir for proper builtin headers."""
+        try:
+            res = subprocess.run(['clang', '-print-resource-dir'], capture_output=True, text=True)
+            if res.returncode == 0:
+                d = res.stdout.strip()
+                if d and os.path.isdir(d):
+                    return d
+        except Exception:
+            pass
+        return None
 
     def get_function_signature_textual(self, cursor) -> Optional[str]:
         """Alternative signature using tokens to preserve complex template types from the source."""
@@ -554,6 +624,12 @@ class CommitCoverageAnalyzer:
 
             # Add discovered Linux include directories
             args.extend(self._discover_linux_includes())
+            # Add verbose g++ discovered system include paths
+            args.extend(self._discover_gcc_verbose_includes())
+            # Add clang resource directory if available
+            crd = self._clang_resource_dir()
+            if crd:
+                args.extend(['-resource-dir', crd])
 
             tu = index.parse(file_path, args=args, unsaved_files=[(file_path, source_text)])
 
