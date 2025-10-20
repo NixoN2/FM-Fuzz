@@ -187,6 +187,7 @@ class CommitCoverageAnalyzer:
                 '-I/usr/include/c++/11',
                 '-I/usr/include/x86_64-linux-gnu/c++/11',
                 '-I/usr/include/c++/11/x86_64-linux-gnu',
+                '-isystem', '/usr/include/x86_64-linux-gnu',
                 '-I/usr/local/include',
                 
                 # CVC5-specific preprocessor definitions
@@ -658,7 +659,6 @@ class CommitCoverageAnalyzer:
                 '-Wimplicit-fallthrough',
                 '-Wshadow',
                 '-fno-operator-names',
-                '-fno-extern-tls-init',
                 '-Wno-deprecated-declarations',
                 '-Wno-error=deprecated-declarations',
                 '-fPIC',

@@ -56,26 +56,37 @@ jobs:
           python - <<'PY'
           import os
           from clang import cindex
-          from clang.cindex import Config
           print('clang module:', cindex.__file__)
           print('LIBCLANG_PATH env:', os.environ.get('LIBCLANG_PATH'))
-          try:
-              print('loaded lib:', Config.loaded_library)
-          except Exception:
-              # Force load from LIBCLANG_PATH if not yet loaded
-              libdir = os.environ.get('LIBCLANG_PATH')
-              if libdir:
-                  import sys
-                  import pathlib
-                  cand = pathlib.Path(libdir) / 'libclang.so'
+          # Force load from LIBCLANG_PATH if available
+          libdir = os.environ.get('LIBCLANG_PATH')
+          using = ''
+          if libdir:
+              import glob, os
+              cands = sorted(glob.glob(os.path.join(libdir, 'libclang.so*')))
+              print('libclang candidates:', cands[:5])
+              if cands:
+                  using = cands[0]
                   try:
-                      Config.set_library_file(str(cand))
-                      print('loaded lib:', Config.loaded_library)
+                      cindex.Config.set_library_file(using)
                   except Exception as e:
-                      print('load failed:', e)
-              else:
-                  print('LIBCLANG_PATH not set')
+                      print('set_library_file failed:', e)
+          print('using libclang:', using or 'default loader')
+          try:
+              idx = cindex.Index.create()
+              print('Index created:', bool(idx))
+          except Exception as e:
+              print('Index error:', e)
           PY
+
+      - name: Locate system headers
+        run: |
+          echo "Searching for stdlib.h and cstddef..."
+          find /usr/include -maxdepth 4 \( -name stdlib.h -o -name cstddef \) 2>/dev/null | head -50 || true
+          echo "Clang resource headers:"
+          RDIR=$(clang -print-resource-dir 2>/dev/null) || true
+          if [ -n "$RDIR" ] && [ -d "$RDIR/include" ]; then ls -la "$RDIR/include" | head -50; else echo "No resource include dir found"; fi
+          echo "g++ include search list:" && echo | g++ -E -x c++ - -v 2>&1 | sed -n '/search starts here:/,/End of search list./p'
       
       - name: Run commit coverage analysis
         working-directory: cvc5
