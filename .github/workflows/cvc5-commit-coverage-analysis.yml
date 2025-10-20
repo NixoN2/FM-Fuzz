@@ -49,7 +49,33 @@ jobs:
       
       - name: Install Python dependencies
         run: |
-          pip install gitpython unidiff "clang==17.0.6" "libclang==17.0.6"
+          pip install gitpython unidiff "libclang==17.0.6"
+
+      - name: Verify libclang Python binding and library
+        run: |
+          python - <<'PY'
+          import os
+          from clang import cindex
+          from clang.cindex import Config
+          print('clang module:', cindex.__file__)
+          print('LIBCLANG_PATH env:', os.environ.get('LIBCLANG_PATH'))
+          try:
+              print('loaded lib:', Config.loaded_library)
+          except Exception:
+              # Force load from LIBCLANG_PATH if not yet loaded
+              libdir = os.environ.get('LIBCLANG_PATH')
+              if libdir:
+                  import sys
+                  import pathlib
+                  cand = pathlib.Path(libdir) / 'libclang.so'
+                  try:
+                      Config.set_library_file(str(cand))
+                      print('loaded lib:', Config.loaded_library)
+                  except Exception as e:
+                      print('load failed:', e)
+              else:
+                  print('LIBCLANG_PATH not set')
+          PY
       
       - name: Run commit coverage analysis
         working-directory: cvc5
