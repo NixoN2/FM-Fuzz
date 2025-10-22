@@ -173,61 +173,8 @@ class CommitCoverageAnalyzer:
         try:
             index = clang.cindex.Index.create()
             
-            # Comprehensive flags based on CVC5's actual build configuration
-            args = [
-                # Force C++ mode for header files
-                '-x', 'c++',
-                # C++ standard
-                '-std=c++17',
-                
-                # Include paths (critical for CVC5)
-                '-I./include',                    # Public headers
-                '-I./build/include',              # Generated headers
-                '-I./src/include',                # Internal headers
-                '-I./src/.',                      # Source directory
-                '-I./build/src',                  # Build source directory
-                '-isystem', './build/deps/include',  # Dependencies
-                
-                # System include paths will be discovered dynamically
-                
-                # CVC5-specific preprocessor definitions
-                '-DCVC5_ASSERTIONS',
-                '-DCVC5_DEBUG', 
-                '-DCVC5_STATISTICS_ON',
-                '-DCVC5_TRACING',
-                '-DCVC5_USE_POLY',
-                '-D__BUILDING_CVC5LIB',
-                '-Dcvc5_obj_EXPORTS',
-                
-                # Compiler flags used by CVC5
-                '-Wall',
-                '-Wsuggest-override',
-                '-Wnon-virtual-dtor', 
-                '-Wimplicit-fallthrough',
-                '-Wshadow',
-                '-fno-operator-names',
-                '-Wno-deprecated-declarations',
-                '-Wno-error=deprecated-declarations',
-                '-fPIC',
-                '-fvisibility=default',
-                
-                # Additional flags for better parsing
-                '-fparse-all-comments',
-                '-Wno-unknown-pragmas',
-                '-Wno-unused-parameter',
-                '-Wno-unused-variable',
-                '-Wno-unused-function'
-            ]
-
-            # Add ALL discovered includes (this will include /usr/include + C++ paths)
-            args.extend(self._discover_linux_includes())
-            args.extend(self._discover_gcc_verbose_includes())
-            args.extend(self._get_comprehensive_system_includes())
-            
-            # Add clang resource directory if available
-            crd = self._clang_resource_dir()
-            if crd:
-                args.extend(['-resource-dir', crd])
+            # Build unified clang arguments
+            args = self._build_clang_args()
             
             print(f"DEBUG_FINAL_ARGS: {len(args)} args, includes: {args[-20:]}")  # Show last 20 (includes)
             
@@ -426,6 +373,15 @@ class CommitCoverageAnalyzer:
             start_search = False
             end_search = False
             
+            # Get the primary GCC version to filter paths
+            primary_gcc_version = None
+            try:
+                gcc_version = subprocess.run(['gcc', '-dumpversion'], capture_output=True, text=True).stdout.strip()
+                if gcc_version:
+                    primary_gcc_version = gcc_version
+            except Exception:
+                pass
+            
             for line in lines:
                 line = line.strip()
                 if '#include <...> search starts here:' in line:
@@ -438,8 +394,20 @@ class CommitCoverageAnalyzer:
                     # Extract path (remove leading spaces and any trailing comments)
                     path = line.split('#')[0].strip()
                     if path and os.path.isdir(path):
-                        paths.append(path)
-                        print(f"DEBUG_INCLUDE_FOUND: {path}")
+                        # Filter out paths from other GCC versions to avoid conflicts
+                        if primary_gcc_version:
+                            # Only include paths from the primary GCC version
+                            if (f'/c++/{primary_gcc_version}' in path or 
+                                f'/gcc/x86_64-linux-gnu/{primary_gcc_version}' in path or
+                                '/usr/include' in path or
+                                '/usr/local/include' in path):
+                                paths.append(path)
+                                print(f"DEBUG_INCLUDE_FOUND: {path}")
+                        else:
+                            # If we can't determine GCC version, be conservative
+                            if ('/usr/include' in path or '/usr/local/include' in path):
+                                paths.append(path)
+                                print(f"DEBUG_INCLUDE_FOUND: {path}")
             
             # CRITICAL: Always add /usr/include manually as fallback
             usr_include = '/usr/include'
@@ -672,49 +640,8 @@ class CommitCoverageAnalyzer:
         
         try:
             index = clang.cindex.Index.create()
-            args = [
-                '-x', 'c++',
-                '-std=c++17',
-                '-I./include',
-                '-I./build/include',
-                '-I./src/include',
-                '-I./src/.',
-                '-I./build/src',
-                '-isystem', './build/deps/include',
-                # System include paths will be discovered dynamically
-                '-DCVC5_ASSERTIONS',
-                '-DCVC5_DEBUG',
-                '-DCVC5_STATISTICS_ON',
-                '-DCVC5_TRACING',
-                '-DCVC5_USE_POLY',
-                '-D__BUILDING_CVC5LIB',
-                '-Dcvc5_obj_EXPORTS',
-                '-Wall',
-                '-Wsuggest-override',
-                '-Wnon-virtual-dtor',
-                '-Wimplicit-fallthrough',
-                '-Wshadow',
-                '-fno-operator-names',
-                '-Wno-deprecated-declarations',
-                '-Wno-error=deprecated-declarations',
-                '-fPIC',
-                '-fvisibility=default',
-                '-fparse-all-comments',
-                '-Wno-unknown-pragmas',
-                '-Wno-unused-parameter',
-                '-Wno-unused-variable',
-                '-Wno-unused-function'
-            ]
-
-            # Add ALL discovered includes (this will include /usr/include + C++ paths)
-            args.extend(self._discover_linux_includes())
-            args.extend(self._discover_gcc_verbose_includes())
-            args.extend(self._get_comprehensive_system_includes())
-            
-            # Add clang resource directory if available
-            crd = self._clang_resource_dir()
-            if crd:
-                args.extend(['-resource-dir', crd])
+            # Build unified clang arguments
+            args = self._build_clang_args()
             
             print(f"DEBUG_FINAL_ARGS: {len(args)} args, includes: {args[-20:]}")  # Show last 20 (includes)
 
@@ -1119,7 +1046,7 @@ class CommitCoverageAnalyzer:
             '/usr/include/x86_64-linux-gnu',
         ]
         
-        # Add primary GCC version paths first
+        # Add primary GCC version paths first - ONLY use the primary version to avoid conflicts
         if primary_gcc_version:
             primary_paths = [
                 f'/usr/include/c++/{primary_gcc_version}',
@@ -1127,7 +1054,10 @@ class CommitCoverageAnalyzer:
                 f'/usr/lib/gcc/x86_64-linux-gnu/{primary_gcc_version}/include',
                 f'/usr/lib/gcc/x86_64-linux-gnu/{primary_gcc_version}/include-fixed',
             ]
-            system_paths.extend(primary_paths)
+            # Only add paths that exist and are from the primary GCC version
+            for path in primary_paths:
+                if os.path.isdir(path):
+                    system_paths.append(path)
         
         # Add verified paths (avoid duplicates)
         added_paths = set()
@@ -1137,6 +1067,143 @@ class CommitCoverageAnalyzer:
                 added_paths.add(path)
                 print(f"DEBUG_SYSTEM_INCLUDE: Added {path}")
         
+        return includes
+
+    def _ensure_c_stdlib(self) -> List[str]:
+        """Ensure C standard library headers are available."""
+        includes = []
+        
+        # Add essential C standard library paths
+        c_stdlib_paths = [
+            '/usr/include',
+            '/usr/lib/gcc/x86_64-linux-gnu/13/include',  # GCC 13 C headers
+            '/usr/lib/gcc/x86_64-linux-gnu/12/include',  # GCC 12 C headers (fallback)
+        ]
+        
+        for path in c_stdlib_paths:
+            if os.path.isdir(path):
+                includes.extend(['-isystem', path])
+                print(f"DEBUG_C_STDLIB: Added C stdlib path: {path}")
+                break  # Use the first available path
+        
+        return includes
+
+    def _build_clang_args(self) -> List[str]:
+        """Build unified clang arguments for CVC5 parsing."""
+        args = [
+            # Force C++ mode for header files
+            '-x', 'c++',
+            # C++ standard
+            '-std=c++17',
+            
+            # Include paths (critical for CVC5)
+            '-I./include',                    # Public headers
+            '-I./build/include',              # Generated headers
+            '-I./src/include',                # Internal headers
+            '-I./src/.',                      # Source directory
+            '-I./build/src',                  # Build source directory
+            '-isystem', './build/deps/include',  # Dependencies
+            
+            # CVC5-specific preprocessor definitions
+            '-DCVC5_ASSERTIONS',
+            '-DCVC5_DEBUG', 
+            '-DCVC5_STATISTICS_ON',
+            '-DCVC5_TRACING',
+            '-DCVC5_USE_POLY',
+            '-D__BUILDING_CVC5LIB',
+            '-Dcvc5_obj_EXPORTS',
+            
+            # Compiler flags used by CVC5
+            '-Wall',
+            '-Wsuggest-override',
+            '-Wnon-virtual-dtor', 
+            '-Wimplicit-fallthrough',
+            '-Wshadow',
+            '-fno-operator-names',
+            '-Wno-deprecated-declarations',
+            '-Wno-error=deprecated-declarations',
+            '-fPIC',
+            '-fvisibility=default',
+            
+            # Additional flags for better parsing
+            '-fparse-all-comments',
+            '-Wno-unknown-pragmas',
+            '-Wno-unused-parameter',
+            '-Wno-unused-variable',
+            '-Wno-unused-function'
+        ]
+        
+        # Add unified system includes (avoiding conflicts and duplicates)
+        args.extend(self._get_unified_system_includes())
+        
+        return args
+
+    def _get_unified_system_includes(self) -> List[str]:
+        """Get unified system include paths avoiding conflicts and duplicates."""
+        includes = []
+        added_paths = set()
+        
+        # Get the primary GCC version to use consistently
+        primary_gcc_version = None
+        try:
+            gcc_version = subprocess.run(['gcc', '-dumpversion'], capture_output=True, text=True).stdout.strip()
+            if gcc_version:
+                primary_gcc_version = gcc_version
+                print(f"DEBUG_UNIFIED_GCC: Using primary GCC version {primary_gcc_version}")
+        except Exception:
+            pass
+        
+        # Essential system paths (always include these first)
+        essential_paths = [
+            '/usr/include',
+            '/usr/local/include',
+            '/usr/include/x86_64-linux-gnu',
+        ]
+        
+        for path in essential_paths:
+            if os.path.isdir(path) and path not in added_paths:
+                includes.extend(['-isystem', path])
+                added_paths.add(path)
+                print(f"DEBUG_UNIFIED_ESSENTIAL: Added {path}")
+        
+        # Add primary GCC version paths (only if we have a primary version)
+        if primary_gcc_version:
+            gcc_paths = [
+                f'/usr/include/c++/{primary_gcc_version}',
+                f'/usr/include/c++/{primary_gcc_version}/backward',
+                f'/usr/lib/gcc/x86_64-linux-gnu/{primary_gcc_version}/include',
+                f'/usr/lib/gcc/x86_64-linux-gnu/{primary_gcc_version}/include-fixed',
+            ]
+            
+            for path in gcc_paths:
+                if os.path.isdir(path) and path not in added_paths:
+                    includes.extend(['-isystem', path])
+                    added_paths.add(path)
+                    print(f"DEBUG_UNIFIED_GCC: Added {path}")
+        
+        # Add GCC toolchain support
+        includes.extend(['--gcc-toolchain=/usr'])
+        
+        # Add clang resource directory if available
+        crd = self._clang_resource_dir()
+        if crd:
+            includes.extend(['-resource-dir', crd])
+            print(f"DEBUG_UNIFIED_CLANG: Added resource dir {crd}")
+        
+        # Ensure C standard library is explicitly available
+        c_stdlib_paths = [
+            '/usr/include',
+            f'/usr/lib/gcc/x86_64-linux-gnu/{primary_gcc_version}/include' if primary_gcc_version else '/usr/lib/gcc/x86_64-linux-gnu/13/include',
+        ]
+        
+        for path in c_stdlib_paths:
+            if os.path.isdir(path) and path not in added_paths:
+                includes.extend(['-isystem', path])
+                added_paths.add(path)
+                print(f"DEBUG_UNIFIED_C_STDLIB: Added C stdlib path {path}")
+                break  # Use the first available path
+        
+        print(f"DEBUG_UNIFIED_TOTAL: Added {len(includes)} total include flags")
         return includes
 
     def _detect_gcc_version_conflicts(self) -> Dict[str, List[str]]:
