@@ -9,6 +9,7 @@ set -e
 COMMITS_TO_ANALYZE=${1:-3}
 PYTHON_SCRIPT=${2:-"$(dirname "$0")/commit_coverage_analyzer.py"}
 COVERAGE_FILE=${3:-"coverage_mapping_merged.json"}
+COMPILE_COMMANDS=${4:-""}
 ARTIFACT_NAME="coverage-mapping-final"
 
 echo "=========================================="
@@ -31,6 +32,15 @@ if [ ! -f "$COVERAGE_FILE" ]; then
     exit 1
 fi
 
+# Auto-detect compile_commands.json in build directory if not provided
+if [ -z "$COMPILE_COMMANDS" ]; then
+    if [ -f "build/compile_commands.json" ]; then
+        COMPILE_COMMANDS="build"
+    elif [ -d "build" ]; then
+        COMPILE_COMMANDS="build"
+    fi
+fi
+
 # Get commits that changed files in src/ folder
 echo "Getting commits that changed files in src/ folder..."
 COMMITS=()
@@ -49,9 +59,7 @@ if [ ${#COMMITS[@]} -eq 0 ]; then
 fi
 
 echo "Found commits that changed src/ files:"
-for i in "${!COMMITS[@]}"; do
-    echo "$((i+1)). ${COMMITS[i]}"
-done
+echo "${COMMITS[@]}" | tr ' ' '\n' | nl -w1 -s'. '
 echo ""
 
 # Analyze each commit
@@ -62,7 +70,6 @@ for commit in "${COMMITS[@]}"; do
     echo "ANALYZING COMMIT $COMMIT_COUNT/$COMMITS_TO_ANALYZE"
     echo "=========================================="
     
-    # Get commit info
     COMMIT_MSG=$(git log --format="%s" -n 1 $commit)
     COMMIT_AUTHOR=$(git log --format="%an" -n 1 $commit)
     COMMIT_DATE=$(git log --format="%ad" -n 1 $commit)
@@ -73,8 +80,12 @@ for commit in "${COMMITS[@]}"; do
     echo "Date: $COMMIT_DATE"
     echo ""
     
-    # Run the coverage analysis (no output file, just console output)
-    python3 "$PYTHON_SCRIPT" $commit --coverage-json $COVERAGE_FILE
+    # Run the coverage analysis
+    if [ -n "$COMPILE_COMMANDS" ]; then
+        python3 "$PYTHON_SCRIPT" $commit --coverage-json "$COVERAGE_FILE" --compile-commands "$COMPILE_COMMANDS"
+    else
+        python3 "$PYTHON_SCRIPT" $commit --coverage-json "$COVERAGE_FILE"
+    fi
     
     echo ""
     echo "----------------------------------------"

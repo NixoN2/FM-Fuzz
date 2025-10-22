@@ -13,73 +13,65 @@ from typing import Dict, List, Set, Optional
 import argparse
 import gc
 import git
-from unidiff import PatchSet
 import re
+import difflib
+import ctypes
+from ctypes.util import find_library
+from os.path import normpath
+from dataclasses import dataclass
 
-try:
-    import clang.cindex
-    CLANG_AVAILABLE = True
-except ImportError:
-    CLANG_AVAILABLE = False
-    print("Warning: clang.cindex not available. Install with: pip install libclang")
+import clang.cindex
 
 # Monkey-patch: expose template argument introspection via libclang C API if missing
-if CLANG_AVAILABLE:
-    try:
-        # Some environments have Python bindings lacking these APIs; use ctypes if available
-        import ctypes
-        from ctypes.util import find_library
+try:
+    libname = find_library('clang')
+    if libname:
+        _libclang = ctypes.CDLL(libname)
 
-        libname = find_library('clang')
-        if libname:
-            _libclang = ctypes.CDLL(libname)
+        CXType = clang.cindex.CXType  # type: ignore
 
-            # Use clang.cindex.CXType definition to ensure ABI compatibility
-            CXType = clang.cindex.CXType  # type: ignore
+        _libclang.clang_Type_getNumTemplateArguments.argtypes = [CXType]
+        _libclang.clang_Type_getNumTemplateArguments.restype = ctypes.c_int
 
-            # Function prototypes
-            _libclang.clang_Type_getNumTemplateArguments.argtypes = [CXType]
-            _libclang.clang_Type_getNumTemplateArguments.restype = ctypes.c_int
+        _libclang.clang_Type_getTemplateArgumentAsType.argtypes = [CXType, ctypes.c_uint]
+        _libclang.clang_Type_getTemplateArgumentAsType.restype = CXType
 
-            _libclang.clang_Type_getTemplateArgumentAsType.argtypes = [CXType, ctypes.c_uint]
-            _libclang.clang_Type_getTemplateArgumentAsType.restype = CXType
+        def _get_num_template_arguments(t):
+            try:
+                return _libclang.clang_Type_getNumTemplateArguments(t._type)
+            except Exception:
+                return -1
 
-            def _get_num_template_arguments(t):
-                try:
-                    return _libclang.clang_Type_getNumTemplateArguments(t._type)
-                except Exception:
-                    return -1
+        def _get_template_argument_type(t, idx: int):
+            try:
+                cxt = _libclang.clang_Type_getTemplateArgumentAsType(t._type, ctypes.c_uint(idx))
+                if hasattr(clang.cindex, 'Type') and hasattr(clang.cindex.Type, 'from_result'):
+                    return clang.cindex.Type.from_result(cxt)  # type: ignore
+                return t
+            except Exception:
+                return t
 
-            def _get_template_argument_type(t, idx: int):
-                try:
-                    cxt = _libclang.clang_Type_getTemplateArgumentAsType(t._type, ctypes.c_uint(idx))
-                    # Wrap returned CXType into a clang.cindex.Type
-                    if hasattr(clang.cindex, 'Type') and hasattr(clang.cindex.Type, 'from_result'):
-                        return clang.cindex.Type.from_result(cxt)  # type: ignore
-                    return t
-                except Exception:
-                    return t
+        if not hasattr(clang.cindex.Type, 'get_num_template_arguments'):
+            clang.cindex.Type.get_num_template_arguments = _get_num_template_arguments  # type: ignore
+        if not hasattr(clang.cindex.Type, 'get_template_argument_type'):
+            clang.cindex.Type.get_template_argument_type = _get_template_argument_type  # type: ignore
+except Exception:
+    pass
 
-            # Attach if not present
-            if not hasattr(clang.cindex.Type, 'get_num_template_arguments'):
-                clang.cindex.Type.get_num_template_arguments = _get_num_template_arguments  # type: ignore
-            if not hasattr(clang.cindex.Type, 'get_template_argument_type'):
-                clang.cindex.Type.get_template_argument_type = _get_template_argument_type  # type: ignore
-    except Exception:
-        pass
+@dataclass
+class FunctionInfo:
+    signature: str
+    alt_signature: Optional[str]
+    start: int
+    end: int
+    file: str
 
-class CommitCoverageAnalyzer:
-    def __init__(self, repo_path: str = "."):
-        """Initialize with repository path."""
-        self.repo_path = Path(repo_path)
-        self.repo = git.Repo(repo_path)
-        self.coverage_map = None
-        # Map from primary mapping entry (path:signature) to an alternative
-        # spelling-based signature mapping entry for debug-only matching.
-        self.alt_signature_map: Dict[str, str] = {}
-    
+class GitHelper:
+    def __init__(self, repo_path: Path, repo: git.Repo):
+        self.repo_path = repo_path
+        self.repo = repo
+
     def get_commit_info(self, commit_hash: str) -> Optional[Dict]:
-        """Get basic commit information"""
         try:
             commit = self.repo.commit(commit_hash)
             return {
@@ -93,35 +85,22 @@ class CommitCoverageAnalyzer:
         except Exception as e:
             print(f"Error getting commit info: {e}")
             return None
-    
+
     def get_commit_diff(self, commit_hash: str) -> str:
-        """Get the unified diff for a commit with zero context for precise line tracking."""
         try:
-            commit = self.repo.commit(commit_hash)
-            if len(commit.parents) > 0:
-                parent = commit.parents[0]
-                result = subprocess.run(['git', 'show', '-U0', '--no-color', commit_hash], 
-                                      capture_output=True, text=True, cwd=self.repo_path)
-                return result.stdout
-            else:
-                result = subprocess.run(['git', 'show', '-U0', '--no-color', commit_hash], 
-                                      capture_output=True, text=True, cwd=self.repo_path)
-                return result.stdout
+            result = subprocess.run(['git', 'show', '-U0', '--no-color', commit_hash],
+                                    capture_output=True, text=True, cwd=self.repo_path)
+            return result.stdout
         except Exception as e:
             print(f"Error getting commit diff: {e}")
             return ""
-    
+
     def get_changed_lines(self, diff_text: str) -> Dict[str, Set[int]]:
-        """Extract precise changed new-file line numbers per file from a -U0 diff.
-        Tracks only '+' lines (added/modified) and maps them to new file line numbers.
-        """
         changed_lines: Dict[str, Set[int]] = {}
         current_file: Optional[str] = None
         in_hunk = False
         new_line = None
-
-        lines = diff_text.split('\n')
-        for raw in lines:
+        for raw in diff_text.split('\n'):
             if raw.startswith('diff --git '):
                 current_file = None
                 in_hunk = False
@@ -133,7 +112,6 @@ class CommitCoverageAnalyzer:
                     changed_lines[current_file] = set()
                 continue
             if raw.startswith('@@ '):
-                # Hunk header, capture new file start
                 m = re.search(r'@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@', raw)
                 if current_file and m:
                     new_line = int(m.group(1))
@@ -148,93 +126,343 @@ class CommitCoverageAnalyzer:
                 changed_lines[current_file].add(new_line)
                 new_line += 1
             elif raw.startswith('-') and not raw.startswith('---'):
-                # deletion: only old file line advances; new_line stays
                 pass
             else:
-                # context line (in -U0 there should be none, but be safe)
                 new_line += 1
-
         return changed_lines
-    
-    def extract_functions_with_clang(self, file_path: str) -> List[Dict]:
-        """Extract function signatures using clang AST parsing"""
-        if not CLANG_AVAILABLE:
-            print("DEBUG_CLANG: clang.cindex not available")
-            return []
-        
-        print(f"DEBUG_CLANG: Starting clang parsing of {file_path}")
-        
-        
-        
+
+    def get_file_text_at_commit(self, rev: Optional[str], path: str) -> Optional[str]:
+        if not rev:
+            return None
         try:
-            index = clang.cindex.Index.create()
-            
-            # Build unified clang arguments
-            args = self._build_clang_args()
-            
-            print(f"DEBUG_FINAL_ARGS: {len(args)} args, includes: {args[-20:]}")  # Show last 20 (includes)
-            
-            # Test clang compilation with the args
-            
-            # Test GCC version compatibility
-            
-            tu = index.parse(file_path, args=args)
-            
-            # Debug: Check for parsing errors
-            if tu.diagnostics:
-                print(f"DEBUG_CLANG: Found {len(tu.diagnostics)} diagnostics:")
-                for diag in tu.diagnostics:
-                    print(f"DEBUG_CLANG_DIAG: {diag.severity}: {diag.spelling}")
-            
-            functions = []
-            
-            def visit_node(node, depth=0):
-                if node.kind in [clang.cindex.CursorKind.FUNCTION_DECL, 
-                               clang.cindex.CursorKind.CXX_METHOD]:
-                    signature = self.get_function_signature(node)
-                    # Prefer spelling; if it looks degraded (e.g., 'int'), try textual tokens
-                    alt_signature = self.get_function_signature_spelling(node)
-                    if alt_signature and '(' in alt_signature and ')' in alt_signature:
-                        # Heuristic: if the alt has isolated primitive params where tokens suggest templates/namespaces,
-                        # reconstruct params from tokens
-                        alt_sig_tokens = self.get_function_signature_textual(node)
-                        if alt_sig_tokens:
-                            alt_signature = alt_sig_tokens
-                    is_cvc5 = self.is_cvc5_function(signature) if signature else False
-                    
-                    if signature and is_cvc5:
-                        func_data = {
-                            'signature': signature,
-                            'alt_signature': alt_signature,
-                            'line': node.location.line,
-                            'file': file_path
-                        }
-                        functions.append(func_data)
-                        print(f"DEBUG_CVC5_FUNCTION: Found CVC5 function: {signature}")
-                        if alt_signature and alt_signature != signature:
-                            print(f"DEBUG_CVC5_FUNCTION_ALT: Alt signature: {alt_signature}")
-                
-                for child in node.get_children():
-                    visit_node(child, depth + 1)
-            
-            print(f"DEBUG_CLANG: Starting AST traversal...")
-            visit_node(tu.cursor)
-            
-            print(f"DEBUG_CLANG: Parsing complete. Found {len(functions)} functions")
-            if functions:
-                print(f"DEBUG_CLANG_SAMPLE: Sample functions found:")
-                for i, func in enumerate(functions[:3]):  # Show first 3 functions
-                    print(f"DEBUG_CLANG_SAMPLE_{i}: {func['signature']}")
-                if len(functions) > 3:
-                    print(f"DEBUG_CLANG_SAMPLE: ... and {len(functions) - 3} more functions")
-            
-            return functions
-            
-        except Exception as e:
-            print(f"DEBUG_CLANG_ERROR: Could not parse {file_path} with clang: {e}")
-            import traceback
-            print(f"DEBUG_CLANG_ERROR_TRACEBACK: {traceback.format_exc()}")
+            result = subprocess.run(['git', 'show', f'{rev}:{path}'], capture_output=True, text=True, cwd=self.repo_path)
+            if result.returncode != 0:
+                return None
+            return result.stdout
+        except Exception:
+            return None
+
+class CoverageMatcher:
+    def __init__(self, coverage_map: Dict[str, Set[str]], alt_signature_map: Dict[str, str]):
+        self.coverage_map = coverage_map
+        self.alt_signature_map = alt_signature_map
+
+    def _strip_line_suffix(self, s: str) -> str:
+        if ':' in s:
+            base, last = s.rsplit(':', 1)
+            if last.isdigit():
+                return base
+        return s
+
+    def _split_path_and_sig(self, key: str):
+        no_line = self._strip_line_suffix(key)
+        if ':' in no_line:
+            path, sig = no_line.split(':', 1)
+            return path, sig
+        return '', no_line
+
+    def _split_signature_parts(self, sig: str):
+        s = self._strip_line_suffix(sig)
+        s = re.sub(r"\[abi:[^\]]+\]", "", s)
+        open_idx = -1
+        angle = 0
+        for i, ch in enumerate(s):
+            if ch == '<':
+                angle += 1
+            elif ch == '>':
+                angle = max(0, angle - 1)
+            elif ch == '(' and angle == 0:
+                open_idx = i
+                break
+        if open_idx == -1:
+            return s, '', ''
+        paren = 0
+        close_idx = -1
+        for j in range(open_idx, len(s)):
+            c = s[j]
+            if c == '<':
+                angle += 1
+            elif c == '>':
+                angle = max(0, angle - 1)
+            elif c == '(':
+                paren += 1
+            elif c == ')':
+                paren -= 1
+                if paren == 0 and angle == 0:
+                    close_idx = j
+                    break
+        if close_idx == -1:
+            return s, '', ''
+        prefix = s[:open_idx+1]
+        params_str = s[open_idx+1:close_idx]
+        suffix = s[close_idx:]
+        return prefix, params_str, suffix
+
+    def normalize_signature_for_compare(self, sig: str) -> str:
+        prefix, params_str, suffix = self._split_signature_parts(sig)
+        if params_str == '':
+            s = self._strip_line_suffix(sig)
+            s = re.sub(r"\[abi:[^\]]+\]", "", s)
+            s = re.sub(r"\s*::\s*", "::", s)
+            return re.sub(r"\s+", " ", s).strip()
+        params: List[str] = []
+        buf: List[str] = []
+        angle = 0
+        paren = 0
+        for ch in params_str:
+            if ch == '<':
+                angle += 1
+            elif ch == '>':
+                angle = max(0, angle - 1)
+            elif ch == '(':
+                paren += 1
+            elif ch == ')':
+                paren = max(0, paren - 1)
+            if ch == ',' and angle == 0 and paren == 0:
+                params.append(''.join(buf).strip())
+                buf = []
+            else:
+                buf.append(ch)
+        if buf:
+            params.append(''.join(buf).strip())
+
+        def normalize_param(p: str) -> str:
+            p = re.sub(r"\s+", " ", p).strip()
+            p = re.sub(r"(\b[\w:<>*&\s]+?)\s+([A-Za-z_][A-Za-z0-9_]*)$", r"\1", p)
+            has_leading_const = p.startswith('const ')
+            if has_leading_const:
+                p = p[len('const '):].strip()
+            m2 = re.match(r'^(.*?)(\s*[&*]+)$', p)
+            if m2:
+                base = m2.group(1).strip()
+                syms = m2.group(2).replace(' ', '')
+            else:
+                base = p
+                syms = ''
+            if has_leading_const:
+                p = f"{base} const{syms}"
+            else:
+                p = f"{base}{syms}"
+            p = re.sub(r"\s+([&*])", r"\1", p)
+            p = re.sub(r"\s*::\s*", "::", p)
+            p = re.sub(r"<\s*", "<", p)
+            p = re.sub(r"\s*>", ">", p)
+            return p
+
+        norm_params = [normalize_param(p) for p in params if p != '']
+        norm_params_str = ', '.join(norm_params)
+        s = f"{prefix}{norm_params_str}{suffix}"
+        s = self._strip_line_suffix(s)
+        s = re.sub(r"\[abi:[^\]]+\]", "", s)
+        s = re.sub(r"\s+", " ", s)
+        s = re.sub(r"\s*::\s*", "::", s)
+        s = re.sub(r",\s*", ", ", s)
+        s = re.sub(r"\s+([&*])", r"\1", s)
+        return s.strip()
+
+    def match(self, functions: List[str]) -> Dict:
+        cov_full_to_tests: Dict[str, Set[str]] = {}
+        cov_sig_to_tests: Dict[str, Set[str]] = {}
+        for k, tests in self.coverage_map.items():
+            path, sig = self._split_path_and_sig(k)
+            norm_sig = self.normalize_signature_for_compare(sig)
+            norm_full = f"{path}:{norm_sig}"
+            cov_full_to_tests.setdefault(norm_full, set()).update(tests)
+            cov_sig_to_tests.setdefault(norm_sig, set()).update(tests)
+        cov_sigs_list = list(cov_sig_to_tests.keys())
+
+        all_covering_tests = set()
+        functions_with_tests = 0
+        functions_without_tests = 0
+        function_test_counts: Dict[str, int] = {}
+        test_function_counts: Dict[str, int] = {}
+        direct_matches = 0
+        path_removed_matches = 0
+        function_matches: Dict[str, Dict] = {}
+        match_type_counts: Dict[str, int] = {}
+
+        for func in functions:
+            matching_tests = set()
+            match_type = "none"
+            our_path, our_sig = self._split_path_and_sig(func)
+            our_sig_norm = self.normalize_signature_for_compare(our_sig)
+            our_full_norm = f"{our_path}:{our_sig_norm}"
+
+            if our_full_norm in cov_full_to_tests:
+                tests = cov_full_to_tests[our_full_norm]
+                matching_tests.update(tests)
+                direct_matches += 1
+                match_type = "direct"
+            elif our_sig_norm in cov_sig_to_tests:
+                tests = cov_sig_to_tests[our_sig_norm]
+                matching_tests.update(tests)
+                path_removed_matches += 1
+                match_type = "path_removed"
+            else:
+                try:
+                    best = max(
+                        ((cov_sig, difflib.SequenceMatcher(None, our_sig_norm, cov_sig).ratio()) for cov_sig in cov_sigs_list),
+                        key=lambda x: x[1],
+                        default=(None, 0.0)
+                    )
+                    best_sig, best_ratio = best
+                    if best_sig is not None and best_ratio >= 0.95:
+                        tests = cov_sig_to_tests.get(best_sig, set())
+                        matching_tests.update(tests)
+                        path_removed_matches += 1
+                        match_type = f"fuzzy:{best_ratio:.2f}"
+                except Exception:
+                    pass
+                if not matching_tests and func in self.alt_signature_map:
+                    alt_func = self.alt_signature_map[func]
+                    alt_path, alt_sig = self._split_path_and_sig(alt_func)
+                    alt_sig_norm = self.normalize_signature_for_compare(alt_sig)
+                    alt_full_norm = f"{alt_path}:{alt_sig_norm}"
+                    alt_tests = set()
+                    alt_type = "none"
+                    if alt_full_norm in cov_full_to_tests:
+                        alt_tests = cov_full_to_tests[alt_full_norm]
+                        alt_type = "alt_direct"
+                    elif alt_sig_norm in cov_sig_to_tests:
+                        alt_tests = cov_sig_to_tests[alt_sig_norm]
+                        alt_type = "alt_path_removed"
+                    else:
+                        try:
+                            best = max(
+                                ((cov_sig, difflib.SequenceMatcher(None, alt_sig_norm, cov_sig).ratio()) for cov_sig in cov_sigs_list),
+                                key=lambda x: x[1],
+                                default=(None, 0.0)
+                            )
+                            best_sig, best_ratio = best
+                            if best_sig is not None and best_ratio >= 0.95:
+                                alt_tests = cov_sig_to_tests.get(best_sig, set())
+                                alt_type = f"alt_fuzzy:{best_ratio:.2f}"
+                        except Exception:
+                            pass
+                    if alt_tests:
+                        matching_tests.update(alt_tests)
+                        match_type = alt_type
+
+            if matching_tests:
+                all_covering_tests.update(matching_tests)
+                functions_with_tests += 1
+                function_test_counts[func] = len(matching_tests)
+                for test in matching_tests:
+                    test_function_counts[test] = test_function_counts.get(test, 0) + 1
+            else:
+                functions_without_tests += 1
+                function_test_counts[func] = 0
+
+            function_matches[func] = {
+                'tests': sorted(list(matching_tests)),
+                'match_type': match_type
+            }
+            match_type_counts[match_type] = match_type_counts.get(match_type, 0) + 1
+
+        return {
+            'all_covering_tests': all_covering_tests,
+            'functions_with_tests': functions_with_tests,
+            'functions_without_tests': functions_without_tests,
+            'total_tests': len(all_covering_tests),
+            'function_test_counts': function_test_counts,
+            'test_function_counts': test_function_counts,
+            'direct_matches': direct_matches,
+            'path_removed_matches': path_removed_matches,
+            'function_matches': function_matches,
+            'match_type_counts': match_type_counts
+        }
+
+class CommitCoverageAnalyzer:
+    def __init__(self, repo_path: str = ".", compile_commands: Optional[str] = None):
+        """Initialize with repository path."""
+        self.repo_path = Path(repo_path)
+        self.repo = git.Repo(repo_path)
+        self.coverage_map = None
+        # Map from primary mapping entry (path:signature) to an alternative
+        # spelling-based signature mapping entry for debug-only matching.
+        self.alt_signature_map: Dict[str, str] = {}
+        self.compdb = None
+        self.compdb_dir: Optional[str] = None
+        self.git = GitHelper(self.repo_path, self.repo)
+        if compile_commands:
+            self._init_compilation_database(compile_commands)
+
+    def _init_compilation_database(self, compile_commands: str) -> None:
+        try:
+            cc_path = Path(compile_commands)
+            cc_dir = cc_path if cc_path.is_dir() else cc_path.parent
+            db = clang.cindex.CompilationDatabase.fromDirectory(str(cc_dir))  # type: ignore
+            # Probe database (may raise if not usable)
+            _ = db.getAllCompileCommands()  # type: ignore[attr-defined]
+            self.compdb = db
+            self.compdb_dir = str(cc_dir)
+        except Exception:
+            self.compdb = None
+            self.compdb_dir = None
+
+    def _extract_args_from_compile_command(self, cmd) -> List[str]:
+        args: List[str] = []
+        try:
+            # libclang API differences: use .arguments if present, else .commandLine
+            raw = list(getattr(cmd, 'arguments', None) or getattr(cmd, 'commandLine', []))
+            # Drop the compiler binary and the source file path
+            # Also drop output-related flags (-o, /Fo, etc.) and compile-only flags like -c
+            skip_next = False
+            src = str(getattr(cmd, 'filename', ''))
+            for i, a in enumerate(raw):
+                if skip_next:
+                    skip_next = False
+                    continue
+                if i == 0:
+                    continue
+                if a == src or a.endswith(src):
+                    continue
+                if a in ('-c',):
+                    continue
+                if a in ('-o', '/Fo'):
+                    skip_next = True
+                    continue
+                args.append(a)
+        except Exception:
             return []
+        # Ensure language for headers
+        if '-x' not in args:
+            args = ['-x', 'c++'] + args
+        return args
+
+    def _get_clang_args_for_file(self, file_path: str) -> List[str]:
+        # Try compilation database
+        if self.compdb:
+            try:
+                abs_path = str((self.repo_path / file_path).resolve()) if not os.path.isabs(file_path) else file_path
+                cmds = self.compdb.getCompileCommands(abs_path)  # type: ignore
+                if cmds and len(cmds) > 0:
+                    # Pick first entry
+                    cc = cmds[0]
+                    args = self._extract_args_from_compile_command(cc)
+                    # Add resource dir if available
+                    crd = self._clang_resource_dir()
+                    if crd and '-resource-dir' not in args:
+                        args.extend(['-resource-dir', crd])
+                    return args
+            except Exception:
+                pass
+        # Fallback
+        return self._build_clang_args()
+    
+    def get_commit_info(self, commit_hash: str) -> Optional[Dict]:
+        """Get basic commit information"""
+        return self.git.get_commit_info(commit_hash)
+    
+    def get_commit_diff(self, commit_hash: str) -> str:
+        """Get the unified diff for a commit with zero context for precise line tracking."""
+        return self.git.get_commit_diff(commit_hash)
+    
+    def get_changed_lines(self, diff_text: str) -> Dict[str, Set[int]]:
+        """Extract precise changed new-file line numbers per file from a -U0 diff.
+        Tracks only '+' lines (added/modified) and maps them to new file line numbers.
+        """
+        return self.git.get_changed_lines(diff_text)
     
     def get_function_signature(self, cursor) -> Optional[str]:
         """Extract gcov-style function signature from a clang cursor"""
@@ -264,8 +492,7 @@ class CommitCoverageAnalyzer:
             line = cursor.location.line
             signature = f"{qualified_name}({param_str}){abi_info}{const_suffix}:{line}"
             return signature
-        except Exception as e:
-            print(f"DEBUG_SIGNATURE_ERROR: Error generating signature: {e}")
+        except Exception:
             return None
 
     def get_function_signature_spelling(self, cursor) -> Optional[str]:
@@ -387,8 +614,7 @@ class CommitCoverageAnalyzer:
                         import re
                         text = re.sub(r"\b" + re.escape(name) + r"\b\s*$", "", text).strip()
                     # Collapse spaces
-                    import re as _re
-                    text = _re.sub(r"\s+", " ", text).strip()
+                    text = re.sub(r"\s+", " ", text).strip()
                     params.append(text)
             param_str = ", ".join(params)
             const_suffix = " const" if cursor.is_const_method() else ""
@@ -452,13 +678,9 @@ class CommitCoverageAnalyzer:
         Includes functions whose body overlaps changed lines or whose signature changed.
         Excludes pure moves (identical normalized body before/after).
         """
-        print(f"Analyzing commit {commit_hash}...")
-
         commit_info = self.get_commit_info(commit_hash)
         if not commit_info:
             return []
-        print(f"Commit: {commit_info['summary']}")
-        print(f"Author: {commit_info['author_name']}")
 
         # Get diff and changed line ranges on the new side
         diff_text = self.get_commit_diff(commit_hash)
@@ -477,10 +699,6 @@ class CommitCoverageAnalyzer:
             if not file_path.endswith(('.cpp', '.cc', '.c', '.h', '.hpp')):
                 continue
 
-            print(f"  Analyzing {file_path} (changed lines: {len(changed_lines)})")
-            if len(changed_lines) > 50:
-                print(f"    Note: large change hunk, limiting to C++ overlap only")
-
             after_src = self.get_file_text_at_commit(commit_hash, file_path)
             if after_src is None:
                 continue
@@ -491,27 +709,27 @@ class CommitCoverageAnalyzer:
             before_funcs = self.parse_functions_from_text(file_path, before_src) if before_src is not None else []
 
             # Build indexes for before
-            before_by_sig = {self.build_signature_key(f['signature']): f for f in before_funcs}
+            before_by_sig = {self.build_signature_key(f.signature): f for f in before_funcs}
 
             # Helper to normalize function body slice
-            def normalized_body(src: str, f: Dict) -> str:
+            def normalized_body(src: str, f: FunctionInfo) -> str:
                 lines = src.splitlines()
-                s = max(1, int(f['start']))
-                e = min(len(lines), int(f['end']))
+                s = max(1, int(f.start))
+                e = min(len(lines), int(f.end))
                 snippet = "\n".join(lines[s-1:e])
                 return self.normalize_code(snippet)
 
             # Per changed line: select the innermost enclosing function (smallest span)
-            selected: Dict[str, Dict] = {}
+            selected: Dict[str, FunctionInfo] = {}
             if after_funcs:
-                spans = [(f, (int(f['end']) - int(f['start']))) for f in after_funcs if self.is_cvc5_function(f['signature'])]
+                spans = [(f, (int(f.end) - int(f.start))) for f in after_funcs if self.is_cvc5_function(f.signature)]
                 for ln in sorted(changed_lines):
-                    candidates = [f for f, span in spans if int(f['start']) <= ln <= int(f['end'])]
+                    candidates = [f for f, span in spans if int(f.start) <= ln <= int(f.end)]
                     if not candidates:
                         continue
                     # choose innermost by minimal span
-                    chosen = min(candidates, key=lambda x: (int(x['end']) - int(x['start']), int(x['start'])))
-                    key = self.build_signature_key(chosen['signature'])
+                    chosen = min(candidates, key=lambda x: (int(x.end) - int(x.start), int(x.start)))
+                    key = self.build_signature_key(chosen.signature)
                     selected[key] = chosen
 
             # Emit selected functions, dropping pure moves
@@ -524,52 +742,28 @@ class CommitCoverageAnalyzer:
                         is_move = True
                 if is_move:
                     continue
-                mapping_entry = f"{file_path}:{f['signature']}"
+                mapping_entry = f"{file_path}:{f.signature}"
                 changed_functions.append(mapping_entry)
                 print(f"    Selected: {mapping_entry} (overlap=True, sig_changed=False)")
-                # Record alternative signature for debug-only matching later
-                alt_sig = f.get('alt_signature')
+                alt_sig = f.alt_signature
                 if alt_sig:
                     alt_entry = f"{file_path}:{alt_sig}"
                     self.alt_signature_map[mapping_entry] = alt_entry
-                    if alt_sig != f['signature']:
+                    if alt_sig != f.signature:
                         print(f"    Selected ALT (debug-only): {alt_entry}")
 
-        print(f"Found {len(changed_functions)} changed functions")
         return changed_functions
 
-    def get_file_text_at_commit(self, rev: Optional[str], path: str) -> Optional[str]:
-        """Return file contents at a given revision without checking out."""
-        if not rev:
-            return None
-        try:
-            result = subprocess.run(['git', 'show', f'{rev}:{path}'], capture_output=True, text=True, cwd=self.repo_path)
-            if result.returncode != 0:
-                return None
-            return result.stdout
-        except Exception:
-            return None
-
-    def parse_functions_from_text(self, file_path: str, source_text: Optional[str]) -> List[Dict]:
+    def parse_functions_from_text(self, file_path: str, source_text: Optional[str]) -> List[FunctionInfo]:
         """Parse C++ function definitions from provided source text using libclang unsaved_files."""
-        if not CLANG_AVAILABLE or source_text is None:
+        if source_text is None:
             return []
-        
-        
         
         try:
             index = clang.cindex.Index.create()
-            # Build unified clang arguments
-            args = self._build_clang_args()
-            
-            print(f"DEBUG_FINAL_ARGS: {len(args)} args, includes: {args[-20:]}")  # Show last 20 (includes)
-
-            # Test clang compilation with the args
-            
-            # Test GCC version compatibility
-
-            tu = index.parse(file_path, args=args, unsaved_files=[(file_path, source_text)])
-            # Print diagnostics similar to extract_functions_with_clang for visibility
+            args = self._get_clang_args_for_file(file_path)
+            abs_path = str((self.repo_path / file_path).resolve()) if not os.path.isabs(file_path) else file_path
+            tu = index.parse(abs_path, args=args, unsaved_files=[(abs_path, source_text)])
             try:
                 if tu.diagnostics:
                     print(f"DEBUG_CLANG_TU_DIAG_COUNT: {len(tu.diagnostics)}")
@@ -578,32 +772,28 @@ class CommitCoverageAnalyzer:
             except Exception:
                 pass
 
-            funcs: List[Dict] = []
+            funcs: List[FunctionInfo] = []
 
             def visit(n):
                 if n.kind in [clang.cindex.CursorKind.FUNCTION_DECL, clang.cindex.CursorKind.CXX_METHOD] and n.is_definition():
                     sig = self.get_function_signature(n)
                     alt_sig = self.get_function_signature_spelling(n)
-                    # Try textual reconstruction if needed
                     if alt_sig and '(' in alt_sig and ')' in alt_sig:
                         alt_sig_tokens = self.get_function_signature_textual(n)
                         if alt_sig_tokens:
                             alt_sig = alt_sig_tokens
-                    # Only keep functions physically defined in this file (exclude headers and system files)
                     node_file = str(n.location.file) if n.location and n.location.file else None
                     if sig and node_file and self.is_cvc5_function(sig):
-                        # Compare by suffix to allow absolute paths
-                        from os.path import normpath
                         nf = normpath(node_file)
-                        exp = normpath(file_path)
+                        exp = normpath(abs_path)
                         if nf.endswith(exp):
-                            funcs.append({
-                                'signature': sig,
-                                'alt_signature': alt_sig,
-                                'start': n.extent.start.line,
-                                'end': n.extent.end.line,
-                                'file': node_file
-                            })
+                            funcs.append(FunctionInfo(
+                                signature=sig,
+                                alt_signature=alt_sig,
+                                start=n.extent.start.line,
+                                end=n.extent.end.line,
+                                file=node_file
+                            ))
                 for c in n.get_children():
                     visit(c)
 
@@ -626,39 +816,11 @@ class CommitCoverageAnalyzer:
         code = re.sub(r'/\*.*?\*/', '', code, flags=re.S)
         code = re.sub(r'\s+', ' ', code).strip()
         return code
-    
-    def load_coverage_mapping(self, coverage_json_path: str):
-        """Load coverage mapping only when needed."""
-        print(f"DEBUG_COVERAGE: Loading coverage mapping from {coverage_json_path}...")
-        with open(coverage_json_path, 'r') as f:
-            self.coverage_map = json.load(f)
-        print(f"DEBUG_COVERAGE: Loaded coverage mapping with {len(self.coverage_map)} functions")
-        
-        # Show sample keys for debugging
-        sample_keys = list(self.coverage_map.keys())[:5]
-        print(f"DEBUG_COVERAGE_SAMPLE_KEYS: Sample coverage mapping keys:")
-        for i, key in enumerate(sample_keys):
-            print(f"DEBUG_COVERAGE_KEY_{i}: '{key}' -> {len(self.coverage_map[key])} tests")
-        
-        # Show key format analysis
-        key_formats = {}
-        for key in list(self.coverage_map.keys())[:100]:  # Analyze first 100 keys
-            if ':' in key:
-                parts = key.split(':')
-                if len(parts) >= 3:
-                    format_key = f"{len(parts)}_parts"
-                    if format_key not in key_formats:
-                        key_formats[format_key] = 0
-                    key_formats[format_key] += 1
-        
-        print(f"DEBUG_COVERAGE_FORMATS: Key format analysis:")
-        for format_type, count in sorted(key_formats.items()):
-            print(f"DEBUG_COVERAGE_FORMAT: {format_type}: {count} keys")
-    
+
     def find_tests_for_functions(self, functions: List[str]) -> Dict:
         """Find unique tests that cover the given functions."""
         if not self.coverage_map:
-            print("DEBUG_MATCHING: Error: Coverage mapping not loaded")
+            print("Error: Coverage mapping not loaded")
             return {
                 'all_covering_tests': set(),
                 'functions_with_tests': 0,
@@ -669,238 +831,8 @@ class CommitCoverageAnalyzer:
                 'direct_matches': 0,
                 'path_removed_matches': 0
             }
-        
-        print(f"DEBUG_MATCHING: Finding tests for {len(functions)} functions...")
-        print(f"DEBUG_MATCHING: Coverage map has {len(self.coverage_map)} entries")
-
-        # --- Normalization helpers (gcov-style) ---
-        def strip_line_suffix(s: str) -> str:
-            if ':' in s:
-                base, last = s.rsplit(':', 1)
-                if last.isdigit():
-                    return base
-            return s
-
-        def split_path_and_sig(key: str):
-            no_line = strip_line_suffix(key)
-            if ':' in no_line:
-                path, sig = no_line.split(':', 1)
-                return path, sig
-            return '', no_line
-
-        def normalize_to_compare(sig_or_key: str) -> str:
-            base = strip_line_suffix(sig_or_key)
-            base = self.normalize_function_signature(base)
-            # Remove spaces before & and *
-            base = re.sub(r"\s+([&*])", r"\1", base)
-            # Single space after commas
-            base = re.sub(r",\s*", ", ", base)
-            # Collapse whitespace
-            base = re.sub(r"\s+", " ", base).strip()
-            # Expand STL defaults for better matching: vector<T> -> vector<T, allocator<T>>
-            try:
-                def expand_vector(m):
-                    inner = m.group(1).strip()
-                    return f"std::vector<{inner}, std::allocator<{inner}> >"
-                base = re.sub(r"std::vector<([^,>]+)>", expand_vector, base)
-            except Exception:
-                pass
-            return base
-
-        # Precompute normalized coverage lookup maps
-        cov_full_to_tests: Dict[str, Set[str]] = {}
-        cov_sig_to_tests: Dict[str, Set[str]] = {}
-        for k, tests in self.coverage_map.items():
-            norm_full = normalize_to_compare(k)  # path:signature
-            cov_full_to_tests.setdefault(norm_full, set()).update(tests)
-            _, sig = split_path_and_sig(k)
-            norm_sig = normalize_to_compare(sig)
-            cov_sig_to_tests.setdefault(norm_sig, set()).update(tests)
-        cov_sigs_list = list(cov_sig_to_tests.keys())
-        
-        # Show sample functions we're trying to match
-        print(f"DEBUG_MATCHING_SAMPLE_FUNCTIONS: Sample functions to match:")
-        for i, func in enumerate(functions[:3]):  # Show first 3 functions
-            print(f"DEBUG_MATCHING_FUNC_{i}: '{func}'")
-        if len(functions) > 3:
-            print(f"DEBUG_MATCHING_FUNC_MORE: ... and {len(functions) - 3} more functions")
-        
-        all_covering_tests = set()
-        functions_with_tests = 0
-        functions_without_tests = 0
-        function_test_counts = {}
-        test_function_counts = {}
-        direct_matches = 0
-        path_removed_matches = 0
-        
-        for i, func in enumerate(functions):
-            matching_tests = set()
-            match_type = "none"
-            
-            # Build our normalized keys
-            our_path, our_sig = split_path_and_sig(func)
-            our_full_norm = normalize_to_compare(f"{our_path}:{our_sig}")
-            our_sig_norm = normalize_to_compare(our_sig)
-
-            # Strategy 1: normalized direct (path+sig, ignore line)
-            if our_full_norm in cov_full_to_tests:
-                tests = cov_full_to_tests[our_full_norm]
-                matching_tests.update(tests)
-                match_type = "direct"
-                direct_matches += 1
-                print(f"DEBUG_MATCHING_DIRECT_SUCCESS: Direct match found for '{func}' -> {len(tests)} tests")
-            else:
-                # Strategy 2: normalized signature-only
-                if our_sig_norm in cov_sig_to_tests:
-                    tests = cov_sig_to_tests[our_sig_norm]
-                    matching_tests.update(tests)
-                    match_type = "path_removed"
-                    path_removed_matches += 1
-                    print(f"DEBUG_MATCHING_PATH_SUCCESS: Path-removed match found for '{func}' -> sig match -> {len(tests)} tests")
-                else:
-                    # Strategy 3: fuzzy among coverage signatures (path-agnostic)
-                    try:
-                        import difflib
-                        best = max(
-                            ((cov_sig, difflib.SequenceMatcher(None, our_sig_norm, cov_sig).ratio()) for cov_sig in cov_sigs_list),
-                            key=lambda x: x[1],
-                            default=(None, 0.0)
-                        )
-                        best_sig, best_ratio = best
-                        if best_sig is not None and best_ratio >= 0.95:
-                            tests = cov_sig_to_tests.get(best_sig, set())
-                            matching_tests.update(tests)
-                            match_type = f"fuzzy:{best_ratio:.2f}"
-                            path_removed_matches += 1
-                            print(f"DEBUG_MATCHING_FUZZY_SUCCESS: '{func}' -> '{best_sig}' ratio={best_ratio:.2f} tests={len(tests)}")
-                    except Exception:
-                        pass
-                    # Debug-only: if still no matches, try the alternative signature (spelling)
-                    if not matching_tests and func in self.alt_signature_map:
-                        alt_func = self.alt_signature_map[func]
-                        alt_path, alt_sig = split_path_and_sig(alt_func)
-                        alt_full_norm = normalize_to_compare(f"{alt_path}:{alt_sig}")
-                        alt_sig_norm = normalize_to_compare(alt_sig)
-                        alt_tests = set()
-                        alt_type = "none"
-                        if alt_full_norm in cov_full_to_tests:
-                            alt_tests = cov_full_to_tests[alt_full_norm]
-                            alt_type = "direct"
-                        elif alt_sig_norm in cov_sig_to_tests:
-                            alt_tests = cov_sig_to_tests[alt_sig_norm]
-                            alt_type = "path_removed"
-                        else:
-                            try:
-                                import difflib
-                                best = max(
-                                    ((cov_sig, difflib.SequenceMatcher(None, alt_sig_norm, cov_sig).ratio()) for cov_sig in cov_sigs_list),
-                                    key=lambda x: x[1],
-                                    default=(None, 0.0)
-                                )
-                                best_sig, best_ratio = best
-                                if best_sig is not None and best_ratio >= 0.95:
-                                    alt_tests = cov_sig_to_tests.get(best_sig, set())
-                                    alt_type = f"fuzzy:{best_ratio:.2f}"
-                            except Exception:
-                                pass
-                        if alt_tests:
-                            print(f"DEBUG_ALT_MATCH_WOULD_HAVE: '{func}' => alt '{alt_func}' ({alt_type}) -> {len(alt_tests)} tests")
-            
-            if matching_tests:
-                all_covering_tests.update(matching_tests)
-                functions_with_tests += 1
-                function_test_counts[func] = len(matching_tests)
-                
-                # Count how many functions each test covers
-                for test in matching_tests:
-                    if test not in test_function_counts:
-                        test_function_counts[test] = 0
-                    test_function_counts[test] += 1
-                
-                print(f"DEBUG_MATCHING_SUCCESS: ✓ {func} ({match_type}): {len(matching_tests)} tests")
-            else:
-                functions_without_tests += 1
-                function_test_counts[func] = 0
-                print(f"DEBUG_MATCHING_FAILED: ✗ {func}: No tests found")
-        
-        print(f"DEBUG_MATCHING_STATS: Matching statistics:")
-        print(f"DEBUG_MATCHING_STATS: Functions with test coverage: {functions_with_tests}/{len(functions)}")
-        print(f"DEBUG_MATCHING_STATS: Functions without test coverage: {functions_without_tests}/{len(functions)}")
-        print(f"DEBUG_MATCHING_STATS: Direct matches: {direct_matches}")
-        print(f"DEBUG_MATCHING_STATS: Path-removed matches: {path_removed_matches}")
-        print(f"DEBUG_MATCHING_STATS: Total unique tests found: {len(all_covering_tests)}")
-        
-        return {
-            'all_covering_tests': all_covering_tests,
-            'functions_with_tests': functions_with_tests,
-            'functions_without_tests': functions_without_tests,
-            'total_tests': len(all_covering_tests),
-            'function_test_counts': function_test_counts,
-            'test_function_counts': test_function_counts,
-            'direct_matches': direct_matches,
-            'path_removed_matches': path_removed_matches
-        }
-    
-    def normalize_function_signature(self, func_sig: str) -> str:
-        """Normalize function signature by standardizing const placement.
-        Robust for template types and spacing.
-        """
-        import re
-
-        try:
-            # Split the signature into prefix, parameter list, and suffix
-            # Example: ns::Cls::f(T1, T2):123
-            m = re.match(r'^(.*?\()(.+?)(\).*)$', func_sig)
-            if not m:
-                return func_sig
-            prefix, params_str, suffix = m.group(1), m.group(2), m.group(3)
-
-            # Split params by commas while respecting angle bracket depth
-            params = []
-            buf = []
-            depth = 0
-            for ch in params_str:
-                if ch == '<':
-                    depth += 1
-                elif ch == '>':
-                    depth = max(0, depth - 1)
-                if ch == ',' and depth == 0:
-                    params.append(''.join(buf).strip())
-                    buf = []
-                else:
-                    buf.append(ch)
-            if buf:
-                params.append(''.join(buf).strip())
-
-            def normalize_param(p: str) -> str:
-                # Collapse internal whitespace
-                p = re.sub(r'\s+', ' ', p).strip()
-                # Detect leading const
-                has_leading_const = p.startswith('const ')
-                if has_leading_const:
-                    p = p[len('const '):].strip()
-                # Extract trailing ref/pointer symbols
-                m2 = re.match(r'^(.*?)(\s*[&*]+)$', p)
-                if m2:
-                    base = m2.group(1).strip()
-                    syms = m2.group(2).replace(' ', '')
-                else:
-                    base = p
-                    syms = ''
-                if has_leading_const:
-                    p = f"{base} const{syms}"
-                else:
-                    p = f"{base}{syms}"
-                # Remove spaces before & and *
-                p = re.sub(r"\s+([&*])", r"\1", p)
-                return p
-
-            norm_params = [normalize_param(p) for p in params if p != '']
-            norm_params_str = ', '.join(norm_params)
-            normalized = f"{prefix}{norm_params_str}{suffix}"
-            return normalized
-        except Exception:
-            return func_sig
+        matcher = CoverageMatcher(self.coverage_map, self.alt_signature_map)
+        return matcher.match(functions)
 
 
     def _get_comprehensive_system_includes(self) -> List[str]:
@@ -910,15 +842,10 @@ class CommitCoverageAnalyzer:
         # CRITICAL: Use the same approach as the workflow - just --gcc-toolchain=/usr
         # This lets clang automatically find the correct include paths
         includes.extend(['--gcc-toolchain=/usr'])
-        print("DEBUG_WORKFLOW_STYLE: Added --gcc-toolchain=/usr (like workflow)")
-        
         # Add clang resource directory if available (for built-in headers)
         crd = self._clang_resource_dir()
         if crd:
             includes.extend(['-resource-dir', crd])
-            print(f"DEBUG_WORKFLOW_CLANG: Added resource dir {crd}")
-        
-        print(f"DEBUG_WORKFLOW_TOTAL: Added {len(includes)} total include flags")
         return includes
 
 
@@ -972,21 +899,15 @@ class CommitCoverageAnalyzer:
         
         return args
 
-
-
     
     def cleanup_coverage_mapping(self):
         """Clean up coverage mapping from memory."""
-        print("Cleaning up coverage mapping from memory...")
         self.coverage_map = None
         gc.collect()
-        print("Memory cleaned up")
     
     def analyze_commit_coverage(self, commit_hash: str, coverage_json_path: str) -> Dict:
         """Complete analysis: get functions from commit and find covering tests."""
-        print(f"\n{'='*60}")
-        print(f"COMMIT COVERAGE ANALYSIS")
-        print(f"{'='*60}")
+        print(f"Analyzing commit {commit_hash}...")
         
         # Step 1: Get changed functions from commit
         changed_functions = self.get_commit_functions(commit_hash)
@@ -1021,54 +942,44 @@ class CommitCoverageAnalyzer:
             'coverage_percentage': (test_results['functions_with_tests'] / len(changed_functions) * 100) if changed_functions else 0
         }
         
-        print(f"\n{'='*60}")
-        print(f"COVERAGE SUMMARY")
-        print(f"{'='*60}")
-        print(f"Total functions changed: {summary['total_functions']}")
-        print(f"Functions with test coverage: {summary['functions_with_tests']}")
-        print(f"Functions without test coverage: {summary['functions_without_tests']}")
-        print(f"Coverage percentage: {summary['coverage_percentage']:.1f}%")
-        print(f"Total unique tests covering changes: {summary['total_covering_tests']}")
+        print(
+            f"Changed functions: {summary['total_functions']}; "
+            f"with coverage: {summary['functions_with_tests']}; "
+            f"without: {summary['functions_without_tests']}; "
+            f"unique tests: {summary['total_covering_tests']}; "
+            f"coverage: {summary['coverage_percentage']:.1f}%"
+        )
         
-        # Summary statistics only
-        print(f"\n{'='*60}")
-        print(f"SUMMARY STATISTICS")
-        print(f"{'='*60}")
+        # Output selected functions and match breakdown
+        print("\nFunctions selected from commit:")
+        for f in changed_functions:
+            mt = test_results.get('function_matches', {}).get(f, {}).get('match_type', 'none')
+            cnt = test_results.get('function_test_counts', {}).get(f, 0)
+            print(f"  {f} -> {mt} (tests={cnt})")
         
-        # Show only counts, not individual mappings
-        function_test_counts = test_results['function_test_counts']
-        if function_test_counts:
-            functions_with_tests = sum(1 for count in function_test_counts.values() if count > 0)
-            functions_without_tests = sum(1 for count in function_test_counts.values() if count == 0)
-            print(f"Functions with tests: {functions_with_tests}")
-            print(f"Functions without tests: {functions_without_tests}")
-        
-        test_function_counts = test_results['test_function_counts']
-        if test_function_counts:
-            total_tests = len(test_function_counts)
-            print(f"Total unique tests: {total_tests}")
-        
-        # Show some covering tests
-        covering_tests = test_results['all_covering_tests']
-        if covering_tests:
-            print(f"\nSample covering tests (showing first 10):")
-            for i, test in enumerate(sorted(covering_tests)[:10], 1):
-                print(f"  {i:2d}. {test}")
-            if len(covering_tests) > 10:
-                print(f"  ... and {len(covering_tests) - 10} more tests")
+        mcounts = test_results.get('match_type_counts', {})
+        if mcounts:
+            print("\nMatch breakdown:")
+            for k in sorted(mcounts.keys()):
+                print(f"  {k}: {mcounts[k]}")
         
         return {
             'commit': commit_hash,
             'changed_functions': changed_functions,
-            'covering_tests': sorted(list(covering_tests)),
+            'covering_tests': sorted(list(test_results['all_covering_tests'])),
+            'function_matches': test_results.get('function_matches', {}),
+            'match_type_counts': test_results.get('match_type_counts', {}),
             'summary': summary
         }
     
+
 def main():
     parser = argparse.ArgumentParser(description='Analyze commit coverage using coverage mapping')
     parser.add_argument('commit', help='Commit hash to analyze')
     parser.add_argument('--coverage-json', default='coverage_mapping_merged.json', 
                        help='Path to coverage mapping JSON file')
+    parser.add_argument('--compile-commands', default=None,
+                       help='Path to compile_commands.json or its directory (for Clang args)')
     
     args = parser.parse_args()
     
@@ -1078,7 +989,7 @@ def main():
         sys.exit(1)
     
     # Initialize analyzer
-    analyzer = CommitCoverageAnalyzer(".")
+    analyzer = CommitCoverageAnalyzer(".", compile_commands=args.compile_commands)
     
     # Analyze commit coverage (output to console only)
     analyzer.analyze_commit_coverage(args.commit, args.coverage_json)

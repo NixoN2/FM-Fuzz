@@ -25,13 +25,6 @@ jobs:
       - name: Export LIBCLANG_PATH
         run: echo "LIBCLANG_PATH=${{ env.LLVM_PATH }}/lib" >> $GITHUB_ENV
 
-      - name: Verify Clang
-        run: |
-          clang++ --version
-          clang -print-resource-dir
-          echo "=== Clang GCC Detection ==="
-          clang++ -v 2>&1 | grep -E "(Found candidate|Selected)" || echo "No GCC detection info"
-      
       - name: Install system development packages
         run: |
           echo "Installing essential development packages..."
@@ -47,140 +40,11 @@ jobs:
             libc++-dev \
             libc++abi-dev
           
-          echo "Verifying installation..."
-          echo "=== C Standard Library Headers ==="
-          ls -la /usr/include/stdlib.h || echo "stdlib.h not found"
-          ls -la /usr/include/stdio.h || echo "stdio.h not found"
-          ls -la /usr/include/string.h || echo "string.h not found"
-          
-          echo "=== C++ Standard Library Headers ==="
-          ls -la /usr/include/c++/14/iostream || echo "GCC 14 iostream not found"
-          
-          echo "=== Checking which GCC version clang will use ==="
-          clang++ -v 2>&1 | grep -E "(Found candidate|Selected)" || echo "No GCC detection info"
-          
-          echo "=== Testing basic compilation ==="
-          echo '#include <iostream>' | clang++ -x c++ - -v 2>&1 | grep -E "(search starts here|End of search list)" || echo "No include search info"
-          
-          echo "=== Verifying GCC 14 installation ==="
-          # Verify that GCC 14 is properly installed
-          gcc --version
-          echo "GCC 14 libstdc++ headers:"
-          ls -la /usr/include/c++/14/ || echo "GCC 14 headers not found"
+          echo "Installation completed"
       
       - name: Install Python dependencies
         run: |
           pip install gitpython unidiff "libclang==17.0.6"
-
-      - name: Verify libclang Python binding and library
-        run: |
-          python - <<'PY'
-          import os
-          from clang import cindex
-          print('clang module:', cindex.__file__)
-          print('LIBCLANG_PATH env:', os.environ.get('LIBCLANG_PATH'))
-          # Force load from LIBCLANG_PATH if available
-          libdir = os.environ.get('LIBCLANG_PATH')
-          using = ''
-          if libdir:
-              import glob, os
-              cands = sorted(glob.glob(os.path.join(libdir, 'libclang.so*')))
-              print('libclang candidates:', cands[:5])
-              if cands:
-                  using = cands[0]
-                  try:
-                      cindex.Config.set_library_file(using)
-                  except Exception as e:
-                      print('set_library_file failed:', e)
-          print('using libclang:', using or 'default loader')
-          try:
-              idx = cindex.Index.create()
-              print('Index created:', bool(idx))
-          except Exception as e:
-              print('Index error:', e)
-          PY
-
-      - name: Locate system headers
-        run: |
-          echo "=== SYSTEM HEADER DISCOVERY ==="
-          echo "Searching for essential C headers..."
-          find /usr/include \( -name stdlib.h -o -name stdio.h -o -name string.h -o -name cstddef \) 2>/dev/null || true
-          echo ""
-          echo "Searching for C++ standard library headers..."
-          find /usr/include \( -name iostream -o -name vector -o -name algorithm -o -name memory \) 2>/dev/null || true
-          echo ""
-          echo "Searching for GCC-specific headers..."
-          find /usr/lib/gcc -name "*.h" 2>/dev/null || true
-          echo ""
-          echo "Clang resource directory and headers:"
-          RDIR=$(clang -print-resource-dir 2>/dev/null) || true
-          if [ -n "$RDIR" ] && [ -d "$RDIR/include" ]; then 
-            echo "Resource dir: $RDIR"
-            ls -la "$RDIR/include" || true
-          else 
-            echo "No resource include dir found"
-          fi
-          echo ""
-          echo "g++ include search list:"
-          echo | g++ -E -x c++ - -v 2>&1 | sed -n '/search starts here:/,/End of search list./p' || true
-          echo ""
-          echo "gcc include search list:"
-          echo | gcc -E -x c - -v 2>&1 | sed -n '/search starts here:/,/End of search list./p' || true
-          echo ""
-          echo "Checking for development packages..."
-          dpkg -l | grep -E "(libc6-dev|build-essential|g\+\+|libstdc\+\+)" || echo "No dev packages found via dpkg"
-          echo ""
-          echo "System include directories:"
-          ls -la /usr/include/ || true
-          echo ""
-          echo "C++ include directories:"
-          ls -la /usr/include/c++/ 2>/dev/null || echo "No C++ include directory found"
-          echo ""
-          echo "GCC version and paths:"
-          gcc --version || true
-          gcc -print-search-dirs 2>/dev/null || true
-
-      - name: Test clang compilation
-        run: |
-          echo "=== TESTING CLANG COMPILATION ==="
-          cat > test_compile.cpp << 'EOF'
-          #include <stdlib.h>
-          #include <iostream>
-          #include <vector>
-          #include <string>
-          int main() { 
-            std::vector<int> v;
-            std::string s = "test";
-            return 0; 
-          }
-          EOF
-          
-          echo "Testing basic clang++ compilation..."
-          if clang++ -std=c++17 test_compile.cpp -o test_compile; then
-            echo "✅ Basic compilation succeeded"
-          else
-            echo "❌ Basic compilation failed"
-            echo "Trying with verbose output:"
-            clang++ -std=c++17 -v test_compile.cpp -o test_compile 2>&1 | head -20
-          fi
-          
-          echo "Testing clang++ with GCC 14 toolchain (recommended approach)..."
-          if clang++ -std=c++17 --gcc-toolchain=/usr test_compile.cpp -o test_compile_gcc14; then
-            echo "✅ GCC 14 toolchain compilation succeeded"
-          else
-            echo "❌ GCC 14 toolchain compilation failed"
-          fi
-          
-          echo "Testing clang++ with libc++ (alternative approach)..."
-          if clang++ -std=c++17 -stdlib=libc++ test_compile.cpp -o test_compile_libcxx; then
-            echo "✅ libc++ compilation succeeded"
-          else
-            echo "❌ libc++ compilation failed"
-          fi
-          
-          
-          echo "Cleaning up test files..."
-          rm -f test_compile test_compile_gcc14 test_compile_libcxx test_compile.cpp
 
       - name: Build CVC5 with coverage
         run: |
@@ -204,15 +68,15 @@ jobs:
 
       - name: Run commit coverage analysis
         working-directory: cvc5
-        run: ${{ github.workspace }}/scripts/cvc5/run_commit_coverage_analysis.sh 15 ${{ github.workspace }}/scripts/cvc5/commit_coverage_analyzer.py ../coverage_mapping_merged.json
-
+        run: ${{ github.workspace }}/scripts/cvc5/run_commit_coverage_analysis.sh 15 ${{ github.workspace }}/scripts/cvc5/commit_coverage_analyzer.py ../coverage_mapping_merged.json build
+      
       - name: Build signature dumper (LibTooling)
         working-directory: cvc5
         run: |
           # Copy the tool source into this repo workspace to build against compile_commands.json
           cp ${{ github.workspace }}/scripts/cvc5/sig_dump.cpp ./sig_dump.cpp
-          # Build using installed LLVM/Clang with GCC 14 toolchain
-          clang++ -std=c++17 --gcc-toolchain=/usr $(llvm-config --cxxflags) sig_dump.cpp -o sig_dump -L"$LLVM_PATH/lib" -Wl,-rpath,"$LLVM_PATH/lib" $(llvm-config --ldflags --system-libs --libs) -lclang-cpp
+          # Build using installed LLVM/Clang with GCC 14 toolchain and proper include paths
+          clang++ -std=c++17 --gcc-toolchain=/usr -isystem /usr/include -isystem /usr/include/x86_64-linux-gnu $(llvm-config --cxxflags) sig_dump.cpp -o sig_dump -L"$LLVM_PATH/lib" -Wl,-rpath,"$LLVM_PATH/lib" $(llvm-config --ldflags --system-libs --libs) -lclang-cpp
 
       - name: Run signature dumper on changed files (HEAD)
         working-directory: cvc5
