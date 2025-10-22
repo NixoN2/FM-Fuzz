@@ -167,6 +167,9 @@ class CommitCoverageAnalyzer:
         # Check system headers first
         self._check_system_headers()
         
+        # Detect GCC version conflicts
+        gcc_versions = self._detect_gcc_version_conflicts()
+        
         try:
             index = clang.cindex.Index.create()
             
@@ -230,6 +233,9 @@ class CommitCoverageAnalyzer:
             
             # Test clang compilation with the args
             self._test_clang_compilation(args)
+            
+            # Test GCC version compatibility
+            self._test_gcc_version_compatibility(args)
             
             tu = index.parse(file_path, args=args)
             
@@ -661,6 +667,9 @@ class CommitCoverageAnalyzer:
         # Check system headers first
         self._check_system_headers()
         
+        # Detect GCC version conflicts
+        gcc_versions = self._detect_gcc_version_conflicts()
+        
         try:
             index = clang.cindex.Index.create()
             args = [
@@ -711,6 +720,9 @@ class CommitCoverageAnalyzer:
 
             # Test clang compilation with the args
             self._test_clang_compilation(args)
+            
+            # Test GCC version compatibility
+            self._test_gcc_version_compatibility(args)
 
             tu = index.parse(file_path, args=args, unsaved_files=[(file_path, source_text)])
             # Print diagnostics similar to extract_functions_with_clang for visibility
@@ -1090,40 +1102,91 @@ class CommitCoverageAnalyzer:
         # Add GCC toolchain support
         includes.extend(['--gcc-toolchain=/usr'])
         
-        # Standard system includes
+        # Get the primary GCC version to avoid conflicts
+        primary_gcc_version = None
+        try:
+            gcc_version = subprocess.run(['gcc', '-dumpversion'], capture_output=True, text=True).stdout.strip()
+            if gcc_version:
+                primary_gcc_version = gcc_version
+                print(f"DEBUG_PRIMARY_GCC: Using GCC version {primary_gcc_version}")
+        except Exception:
+            pass
+        
+        # Standard system includes (always include these)
         system_paths = [
             '/usr/include',
             '/usr/local/include',
             '/usr/include/x86_64-linux-gnu',
-            '/usr/include/c++/13',
-            '/usr/include/c++/13/backward',
-            '/usr/lib/gcc/x86_64-linux-gnu/13/include',
-            '/usr/lib/gcc/x86_64-linux-gnu/13/include-fixed',
         ]
         
-        # Check for alternative GCC versions
-        try:
-            gcc_version = subprocess.run(['gcc', '-dumpversion'], capture_output=True, text=True).stdout.strip()
-            if gcc_version:
-                # Try different GCC versions
-                for version in [gcc_version, '13', '12', '11', '10']:
-                    alt_paths = [
-                        f'/usr/include/c++/{version}',
-                        f'/usr/include/c++/{version}/backward',
-                        f'/usr/lib/gcc/x86_64-linux-gnu/{version}/include',
-                        f'/usr/lib/gcc/x86_64-linux-gnu/{version}/include-fixed',
-                    ]
-                    system_paths.extend(alt_paths)
-        except Exception:
-            pass
+        # Add primary GCC version paths first
+        if primary_gcc_version:
+            primary_paths = [
+                f'/usr/include/c++/{primary_gcc_version}',
+                f'/usr/include/c++/{primary_gcc_version}/backward',
+                f'/usr/lib/gcc/x86_64-linux-gnu/{primary_gcc_version}/include',
+                f'/usr/lib/gcc/x86_64-linux-gnu/{primary_gcc_version}/include-fixed',
+            ]
+            system_paths.extend(primary_paths)
         
-        # Add verified paths
+        # Add verified paths (avoid duplicates)
+        added_paths = set()
         for path in system_paths:
-            if os.path.isdir(path):
+            if os.path.isdir(path) and path not in added_paths:
                 includes.extend(['-isystem', path])
+                added_paths.add(path)
                 print(f"DEBUG_SYSTEM_INCLUDE: Added {path}")
         
         return includes
+
+    def _detect_gcc_version_conflicts(self) -> Dict[str, List[str]]:
+        """Detect available GCC versions and their include paths to avoid conflicts."""
+        gcc_versions = {}
+        
+        try:
+            # Find all GCC versions
+            for version in ['13', '12', '14', '11', '10']:
+                version_paths = []
+                
+                # Check C++ headers
+                cpp_path = f'/usr/include/c++/{version}'
+                if os.path.isdir(cpp_path):
+                    version_paths.append(cpp_path)
+                
+                # Check GCC include paths
+                gcc_include = f'/usr/lib/gcc/x86_64-linux-gnu/{version}/include'
+                if os.path.isdir(gcc_include):
+                    version_paths.append(gcc_include)
+                
+                if version_paths:
+                    gcc_versions[version] = version_paths
+                    print(f"DEBUG_GCC_VERSION: Found GCC {version} with paths: {version_paths}")
+        
+        except Exception as e:
+            print(f"DEBUG_GCC_VERSION_ERROR: {e}")
+        
+        return gcc_versions
+
+    def _test_gcc_version_compatibility(self, args: List[str]) -> bool:
+        """Test if the current GCC version setup works with clang."""
+        test_code = '''
+        #include <stdlib.h>
+        #include <iostream>
+        int main() { return 0; }
+        '''
+        
+        try:
+            result = subprocess.run(['clang++'] + args + ['-x', 'c++', '-'], 
+                                  input=test_code, text=True, capture_output=True)
+            if result.returncode == 0:
+                print("DEBUG_GCC_COMPAT: ✅ GCC version compatibility test passed")
+                return True
+            else:
+                print(f"DEBUG_GCC_COMPAT: ❌ GCC version compatibility test failed: {result.stderr[:200]}")
+                return False
+        except Exception as e:
+            print(f"DEBUG_GCC_COMPAT: ❌ GCC compatibility test error: {e}")
+            return False
 
     def _check_system_headers(self) -> bool:
         """Check if essential system headers are available."""
