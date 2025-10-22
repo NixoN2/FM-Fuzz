@@ -47,6 +47,15 @@ jobs:
           gunzip coverage_mapping_merged.json.gz
           ls -la coverage_mapping_merged.json
       
+      - name: Install system development packages
+        run: |
+          echo "Installing essential development packages..."
+          sudo apt-get update
+          sudo apt-get install -y build-essential libc6-dev g++ libstdc++-13-dev
+          echo "Verifying installation..."
+          ls -la /usr/include/stdlib.h || echo "stdlib.h not found after installation"
+          ls -la /usr/include/c++/13/iostream || echo "iostream not found after installation"
+
       - name: Install Python dependencies
         run: |
           pip install gitpython unidiff "libclang==17.0.6"
@@ -81,12 +90,70 @@ jobs:
 
       - name: Locate system headers
         run: |
-          echo "Searching for stdlib.h and cstddef..."
-          find /usr/include -maxdepth 4 \( -name stdlib.h -o -name cstddef \) 2>/dev/null | head -50 || true
-          echo "Clang resource headers:"
+          echo "=== SYSTEM HEADER DISCOVERY ==="
+          echo "Searching for essential C headers..."
+          find /usr/include \( -name stdlib.h -o -name stdio.h -o -name string.h -o -name cstddef \) 2>/dev/null || true
+          echo ""
+          echo "Searching for C++ standard library headers..."
+          find /usr/include \( -name iostream -o -name vector -o -name algorithm -o -name memory \) 2>/dev/null || true
+          echo ""
+          echo "Searching for GCC-specific headers..."
+          find /usr/lib/gcc -name "*.h" 2>/dev/null || true
+          echo ""
+          echo "Clang resource directory and headers:"
           RDIR=$(clang -print-resource-dir 2>/dev/null) || true
-          if [ -n "$RDIR" ] && [ -d "$RDIR/include" ]; then ls -la "$RDIR/include" | head -50; else echo "No resource include dir found"; fi
-          echo "g++ include search list:" && echo | g++ -E -x c++ - -v 2>&1 | sed -n '/search starts here:/,/End of search list./p'
+          if [ -n "$RDIR" ] && [ -d "$RDIR/include" ]; then 
+            echo "Resource dir: $RDIR"
+            ls -la "$RDIR/include" || true
+          else 
+            echo "No resource include dir found"
+          fi
+          echo ""
+          echo "g++ include search list:"
+          echo | g++ -E -x c++ - -v 2>&1 | sed -n '/search starts here:/,/End of search list./p' || true
+          echo ""
+          echo "gcc include search list:"
+          echo | gcc -E -x c - -v 2>&1 | sed -n '/search starts here:/,/End of search list./p' || true
+          echo ""
+          echo "Checking for development packages..."
+          dpkg -l | grep -E "(libc6-dev|build-essential|g\+\+|libstdc\+\+)" || echo "No dev packages found via dpkg"
+          echo ""
+          echo "System include directories:"
+          ls -la /usr/include/ || true
+          echo ""
+          echo "C++ include directories:"
+          ls -la /usr/include/c++/ 2>/dev/null || echo "No C++ include directory found"
+          echo ""
+          echo "GCC version and paths:"
+          gcc --version || true
+          gcc -print-search-dirs 2>/dev/null || true
+
+      - name: Test clang compilation
+        run: |
+          echo "=== TESTING CLANG COMPILATION ==="
+          cat > test_compile.cpp << 'EOF'
+          #include <stdlib.h>
+          #include <iostream>
+          #include <vector>
+          #include <string>
+          int main() { 
+            std::vector<int> v;
+            std::string s = "test";
+            return 0; 
+          }
+          EOF
+          
+          echo "Testing basic clang++ compilation..."
+          clang++ -std=c++17 test_compile.cpp -o test_compile || echo "Basic compilation failed"
+          
+          echo "Testing clang++ with system includes..."
+          clang++ -std=c++17 -isystem /usr/include -isystem /usr/include/c++/13 -isystem /usr/include/x86_64-linux-gnu test_compile.cpp -o test_compile_system || echo "System include compilation failed"
+          
+          echo "Testing clang++ with GCC toolchain..."
+          clang++ -std=c++17 --gcc-toolchain=/usr test_compile.cpp -o test_compile_gcc || echo "GCC toolchain compilation failed"
+          
+          echo "Cleaning up test files..."
+          rm -f test_compile test_compile_system test_compile_gcc test_compile.cpp
       
       - name: Run commit coverage analysis
         working-directory: cvc5

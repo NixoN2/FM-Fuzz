@@ -164,6 +164,9 @@ class CommitCoverageAnalyzer:
         
         print(f"DEBUG_CLANG: Starting clang parsing of {file_path}")
         
+        # Check system headers first
+        self._check_system_headers()
+        
         try:
             index = clang.cindex.Index.create()
             
@@ -216,6 +219,7 @@ class CommitCoverageAnalyzer:
             # Add ALL discovered includes (this will include /usr/include + C++ paths)
             args.extend(self._discover_linux_includes())
             args.extend(self._discover_gcc_verbose_includes())
+            args.extend(self._get_comprehensive_system_includes())
             
             # Add clang resource directory if available
             crd = self._clang_resource_dir()
@@ -224,16 +228,8 @@ class CommitCoverageAnalyzer:
             
             print(f"DEBUG_FINAL_ARGS: {len(args)} args, includes: {args[-20:]}")  # Show last 20 (includes)
             
-            # Test if stdlib.h can be found with these args
-            try:
-                test_proc = subprocess.run(['clang++'] + args + ['-E', '-x', 'c++', '-'], 
-                                         input='#include <stdlib.h>', text=True, capture_output=True)
-                if test_proc.returncode == 0:
-                    print("DEBUG_STDLIB_TEST: ✅ stdlib.h found successfully")
-                else:
-                    print(f"DEBUG_STDLIB_TEST: ❌ stdlib.h test failed: {test_proc.stderr[:200]}")
-            except Exception as e:
-                print(f"DEBUG_STDLIB_TEST: ❌ stdlib.h test error: {e}")
+            # Test clang compilation with the args
+            self._test_clang_compilation(args)
             
             tu = index.parse(file_path, args=args)
             
@@ -661,6 +657,10 @@ class CommitCoverageAnalyzer:
         """Parse C++ function definitions from provided source text using libclang unsaved_files."""
         if not CLANG_AVAILABLE or source_text is None:
             return []
+        
+        # Check system headers first
+        self._check_system_headers()
+        
         try:
             index = clang.cindex.Index.create()
             args = [
@@ -700,6 +700,7 @@ class CommitCoverageAnalyzer:
             # Add ALL discovered includes (this will include /usr/include + C++ paths)
             args.extend(self._discover_linux_includes())
             args.extend(self._discover_gcc_verbose_includes())
+            args.extend(self._get_comprehensive_system_includes())
             
             # Add clang resource directory if available
             crd = self._clang_resource_dir()
@@ -707,6 +708,9 @@ class CommitCoverageAnalyzer:
                 args.extend(['-resource-dir', crd])
             
             print(f"DEBUG_FINAL_ARGS: {len(args)} args, includes: {args[-20:]}")  # Show last 20 (includes)
+
+            # Test clang compilation with the args
+            self._test_clang_compilation(args)
 
             tu = index.parse(file_path, args=args, unsaved_files=[(file_path, source_text)])
             # Print diagnostics similar to extract_functions_with_clang for visibility
@@ -1078,6 +1082,95 @@ class CommitCoverageAnalyzer:
         except Exception:
             pass
         return includes
+
+    def _get_comprehensive_system_includes(self) -> List[str]:
+        """Get comprehensive system include paths including GCC toolchain support."""
+        includes = []
+        
+        # Add GCC toolchain support
+        includes.extend(['--gcc-toolchain=/usr'])
+        
+        # Standard system includes
+        system_paths = [
+            '/usr/include',
+            '/usr/local/include',
+            '/usr/include/x86_64-linux-gnu',
+            '/usr/include/c++/13',
+            '/usr/include/c++/13/backward',
+            '/usr/lib/gcc/x86_64-linux-gnu/13/include',
+            '/usr/lib/gcc/x86_64-linux-gnu/13/include-fixed',
+        ]
+        
+        # Check for alternative GCC versions
+        try:
+            gcc_version = subprocess.run(['gcc', '-dumpversion'], capture_output=True, text=True).stdout.strip()
+            if gcc_version:
+                # Try different GCC versions
+                for version in [gcc_version, '13', '12', '11', '10']:
+                    alt_paths = [
+                        f'/usr/include/c++/{version}',
+                        f'/usr/include/c++/{version}/backward',
+                        f'/usr/lib/gcc/x86_64-linux-gnu/{version}/include',
+                        f'/usr/lib/gcc/x86_64-linux-gnu/{version}/include-fixed',
+                    ]
+                    system_paths.extend(alt_paths)
+        except Exception:
+            pass
+        
+        # Add verified paths
+        for path in system_paths:
+            if os.path.isdir(path):
+                includes.extend(['-isystem', path])
+                print(f"DEBUG_SYSTEM_INCLUDE: Added {path}")
+        
+        return includes
+
+    def _check_system_headers(self) -> bool:
+        """Check if essential system headers are available."""
+        essential_headers = [
+            '/usr/include/stdlib.h',
+            '/usr/include/stdio.h',
+            '/usr/include/string.h',
+            '/usr/include/c++/13/iostream',
+            '/usr/include/c++/13/vector',
+        ]
+        
+        missing_headers = []
+        for header in essential_headers:
+            if not os.path.exists(header):
+                missing_headers.append(header)
+        
+        if missing_headers:
+            print(f"DEBUG_MISSING_HEADERS: Missing system headers:")
+            for header in missing_headers:
+                print(f"DEBUG_MISSING_HEADER: {header}")
+            print("DEBUG_MISSING_HEADERS: Consider installing: sudo apt-get install build-essential libc6-dev g++")
+            return False
+        
+        print("DEBUG_HEADERS: All essential system headers found")
+        return True
+
+    def _test_clang_compilation(self, args: List[str]) -> bool:
+        """Test if clang can compile a simple C++ program with the given args."""
+        test_code = '''
+        #include <stdlib.h>
+        #include <iostream>
+        #include <vector>
+        int main() { return 0; }
+        '''
+        
+        try:
+            result = subprocess.run(['clang++'] + args + ['-x', 'c++', '-'], 
+                                  input=test_code, text=True, capture_output=True)
+            if result.returncode == 0:
+                print("DEBUG_CLANG_TEST: ✅ Clang compilation test passed")
+                return True
+            else:
+                print(f"DEBUG_CLANG_TEST: ❌ Clang compilation test failed: {result.stderr[:200]}")
+                return False
+        except Exception as e:
+            print(f"DEBUG_CLANG_TEST: ❌ Clang test error: {e}")
+            return False
     
     def cleanup_coverage_mapping(self):
         """Clean up coverage mapping from memory."""
