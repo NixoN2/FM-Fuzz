@@ -246,7 +246,8 @@ class CoverageMatcher:
             p = re.sub(r"\s+([&*])", r"\1", p)
             p = re.sub(r"\s*::\s*", "::", p)
             p = re.sub(r"<\s*", "<", p)
-            p = re.sub(r"\s*>", ">", p)
+            # Don't remove spaces before > to preserve template spacing like "> >"
+            # p = re.sub(r"\s*>", ">", p)  # Commented out to preserve template spacing
             return p
 
         norm_params = [normalize_param(p) for p in params if p != '']
@@ -801,6 +802,10 @@ class CommitCoverageAnalyzer:
         code = re.sub(r'/\*.*?\*/', '', code, flags=re.S)
         code = re.sub(r'\s+', ' ', code).strip()
         return code
+
+    def load_coverage_mapping(self, coverage_json_path: str):
+        with open(coverage_json_path, 'r') as f:
+            self.coverage_map = json.load(f)
 
     def find_tests_for_functions(self, functions: List[str]) -> Dict:
         """Find unique tests that cover the given functions."""
