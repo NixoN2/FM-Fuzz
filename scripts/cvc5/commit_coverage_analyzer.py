@@ -357,77 +357,6 @@ class CommitCoverageAnalyzer:
             except Exception:
                 return ''
 
-    def _discover_gcc_verbose_includes(self) -> List[str]:
-        """Parse g++ verbose include search list and return -isystem dirs. FIXED VERSION."""
-        paths: List[str] = []
-        try:
-            proc = subprocess.run(['g++', '-E', '-x', 'c++', '-', '-v'], 
-                                input='', text=True, capture_output=True)
-            out = proc.stderr if proc.stderr else proc.stdout
-            if not out:
-                return []
-            
-            lines = out.splitlines()
-            start_search = False
-            end_search = False
-            
-            # Get the primary GCC version to filter paths
-            primary_gcc_version = None
-            try:
-                gcc_version = subprocess.run(['gcc', '-dumpversion'], capture_output=True, text=True).stdout.strip()
-                if gcc_version:
-                    primary_gcc_version = gcc_version
-            except Exception:
-                pass
-            
-            for line in lines:
-                line = line.strip()
-                if '#include <...> search starts here:' in line:
-                    start_search = True
-                    continue
-                if start_search and 'End of search list.' in line:
-                    end_search = True
-                    break
-                if start_search and not end_search:
-                    # Extract path (remove leading spaces and any trailing comments)
-                    path = line.split('#')[0].strip()
-                    if path and os.path.isdir(path):
-                        # Filter out paths from other GCC versions to avoid conflicts
-                        if primary_gcc_version:
-                            # Only include paths from the primary GCC version
-                            if (f'/c++/{primary_gcc_version}' in path or 
-                                f'/gcc/x86_64-linux-gnu/{primary_gcc_version}' in path or
-                                '/usr/include' in path or
-                                '/usr/local/include' in path):
-                                paths.append(path)
-                                print(f"DEBUG_INCLUDE_FOUND: {path}")
-                        else:
-                            # If we can't determine GCC version, be conservative
-                            if ('/usr/include' in path or '/usr/local/include' in path):
-                                paths.append(path)
-                                print(f"DEBUG_INCLUDE_FOUND: {path}")
-            
-            # CRITICAL: Always add /usr/include manually as fallback
-            usr_include = '/usr/include'
-            if os.path.isdir(usr_include) and usr_include not in paths:
-                paths.append(usr_include)
-                print(f"DEBUG_INCLUDE_ADDED_FALLBACK: {usr_include}")
-                
-        except Exception as e:
-            print(f"DEBUG_INCLUDE_ERROR: {e}")
-            # Emergency fallback
-            fallback = ['/usr/include']
-            for p in fallback:
-                if os.path.isdir(p):
-                    paths.append(p)
-        
-        # Convert to -isystem flags
-        result = []
-        for p in paths:
-            result.extend(['-isystem', p])
-        
-        print(f"DEBUG_INCLUDE_PATHS: Found {len(paths)} include paths")
-        return result
 
     def _clang_resource_dir(self) -> Optional[str]:
         """Try to get clang resource dir for proper builtin headers."""
@@ -981,101 +910,25 @@ class CommitCoverageAnalyzer:
         except Exception:
             return func_sig
 
-    def _discover_linux_includes(self) -> List[str]:
-        """Discover generic Linux GCC/libstdc++ include directories for libclang parsing."""
-        includes: List[str] = []
-        try:
-            def out(cmd: List[str]) -> str:
-                res = subprocess.run(cmd, capture_output=True, text=True)
-                return res.stdout.strip()
-
-            dumpver = out(['g++', '-dumpversion']) or ''
-            dumpmach = out(['g++', '-dumpmachine']) or ''
-            gcc_inc = out(['g++', '-print-file-name=include'])
-            candidates = set()
-            # Direct GCC include dir
-            if gcc_inc and os.path.isdir(gcc_inc):
-                candidates.add(gcc_inc)
-            # Common libstdc++ layouts
-            if dumpver:
-                candidates.add(f"/usr/include/c++/{dumpver}")
-                if dumpmach:
-                    candidates.add(f"/usr/include/{dumpmach}/c++/{dumpver}")
-            # Backward headers
-            if dumpver:
-                candidates.add(f"/usr/include/c++/{dumpver}/backward")
-            # Machine-specific
-            if dumpmach:
-                candidates.add(f"/usr/include/{dumpmach}")
-            # Generic
-            candidates.add('/usr/include')
-            candidates.add('/usr/local/include')
-
-            for p in sorted(candidates):
-                if os.path.isdir(p):
-                    includes.extend(['-isystem', p])
-        except Exception:
-            pass
-        return includes
 
     def _get_comprehensive_system_includes(self) -> List[str]:
-        """Get comprehensive system include paths using only GCC 14 toolchain."""
+        """Get system include paths using GCC 14 toolchain (simplified approach like workflow)."""
         includes = []
         
-        # Add GCC toolchain support (critical for consistency with workflow)
+        # CRITICAL: Use the same approach as the workflow - just --gcc-toolchain=/usr
+        # This lets clang automatically find the correct include paths
         includes.extend(['--gcc-toolchain=/usr'])
-        print("DEBUG_GCC14_TOOLCHAIN: Added --gcc-toolchain=/usr")
+        print("DEBUG_WORKFLOW_STYLE: Added --gcc-toolchain=/usr (like workflow)")
         
-        # Standard system includes (always include these)
-        system_paths = [
-            '/usr/include',
-            '/usr/local/include',
-            '/usr/include/x86_64-linux-gnu',
-        ]
+        # Add clang resource directory if available (for built-in headers)
+        crd = self._clang_resource_dir()
+        if crd:
+            includes.extend(['-resource-dir', crd])
+            print(f"DEBUG_WORKFLOW_CLANG: Added resource dir {crd}")
         
-        # GCC 14 specific paths (only GCC 14, no other versions)
-        gcc14_paths = [
-            '/usr/include/c++/14',
-            '/usr/include/c++/14/backward',
-            '/usr/lib/gcc/x86_64-linux-gnu/14/include',
-            '/usr/lib/gcc/x86_64-linux-gnu/14/include-fixed',
-        ]
-        
-        # Add GCC 14 paths that exist
-        for path in gcc14_paths:
-            if os.path.isdir(path):
-                system_paths.append(path)
-                print(f"DEBUG_GCC14_PATH: Found GCC 14 path {path}")
-        
-        # Add verified paths (avoid duplicates)
-        added_paths = set()
-        for path in system_paths:
-            if os.path.isdir(path) and path not in added_paths:
-                includes.extend(['-isystem', path])
-                added_paths.add(path)
-                print(f"DEBUG_GCC14_INCLUDE: Added {path}")
-        
-        print(f"DEBUG_GCC14_TOTAL: Added {len(includes)} total include flags")
+        print(f"DEBUG_WORKFLOW_TOTAL: Added {len(includes)} total include flags")
         return includes
 
-    def _ensure_c_stdlib(self) -> List[str]:
-        """Ensure C standard library headers are available using GCC 14."""
-        includes = []
-        
-        # Add essential C standard library paths (GCC 14 only)
-        c_stdlib_paths = [
-            '/usr/include',                                    # Primary C standard library
-            '/usr/lib/gcc/x86_64-linux-gnu/14/include',      # GCC 14 C headers
-            '/usr/include/x86_64-linux-gnu',                  # Architecture-specific C headers
-        ]
-        
-        for path in c_stdlib_paths:
-            if os.path.isdir(path):
-                includes.extend(['-isystem', path])
-                print(f"DEBUG_GCC14_C_STDLIB: Added C stdlib path: {path}")
-                break  # Use the first available path
-        
-        return includes
 
     def _build_clang_args(self) -> List[str]:
         """Build unified clang arguments for CVC5 parsing."""
@@ -1128,79 +981,7 @@ class CommitCoverageAnalyzer:
         return args
 
 
-    def _detect_gcc_version_conflicts(self) -> Dict[str, List[str]]:
-        """Detect GCC 14 include paths to ensure consistency."""
-        gcc_versions = {}
-        
-        try:
-            # Only check for GCC 14 (matching workflow's libstdc++-14-dev)
-            version = '14'
-            version_paths = []
-            
-            # Check C++ headers
-            cpp_path = f'/usr/include/c++/{version}'
-            if os.path.isdir(cpp_path):
-                version_paths.append(cpp_path)
-            
-            # Check GCC include paths
-            gcc_include = f'/usr/lib/gcc/x86_64-linux-gnu/{version}/include'
-            if os.path.isdir(gcc_include):
-                version_paths.append(gcc_include)
-            
-            if version_paths:
-                gcc_versions[version] = version_paths
-                print(f"DEBUG_GCC14_VERSION: Found GCC {version} with paths: {version_paths}")
-            else:
-                print("DEBUG_GCC14_VERSION: Warning - GCC 14 paths not found")
-        
-        except Exception as e:
-            print(f"DEBUG_GCC14_VERSION_ERROR: {e}")
-        
-        return gcc_versions
 
-    def _test_gcc_version_compatibility(self, args: List[str]) -> bool:
-        """Test if the current GCC version setup works with clang."""
-        test_code = '''
-        #include <stdlib.h>
-        #include <iostream>
-        int main() { return 0; }
-        '''
-        
-        try:
-            result = subprocess.run(['clang++'] + args + ['-x', 'c++', '-'], 
-                                  input=test_code, text=True, capture_output=True)
-            if result.returncode == 0:
-                print("DEBUG_GCC_COMPAT: ✅ GCC version compatibility test passed")
-                return True
-            else:
-                print(f"DEBUG_GCC_COMPAT: ❌ GCC version compatibility test failed: {result.stderr[:200]}")
-                return False
-        except Exception as e:
-            print(f"DEBUG_GCC_COMPAT: ❌ GCC compatibility test error: {e}")
-            return False
-
-
-    def _test_clang_compilation(self, args: List[str]) -> bool:
-        """Test if clang can compile a simple C++ program with the given args."""
-        test_code = '''
-        #include <stdlib.h>
-        #include <iostream>
-        #include <vector>
-        int main() { return 0; }
-        '''
-        
-        try:
-            result = subprocess.run(['clang++'] + args + ['-x', 'c++', '-'], 
-                                  input=test_code, text=True, capture_output=True)
-            if result.returncode == 0:
-                print("DEBUG_CLANG_TEST: ✅ Clang compilation test passed")
-                return True
-            else:
-                print(f"DEBUG_CLANG_TEST: ❌ Clang compilation test failed: {result.stderr[:200]}")
-                return False
-        except Exception as e:
-            print(f"DEBUG_CLANG_TEST: ❌ Clang test error: {e}")
-            return False
     
     def cleanup_coverage_mapping(self):
         """Clean up coverage mapping from memory."""
