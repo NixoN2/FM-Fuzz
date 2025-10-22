@@ -1123,77 +1123,10 @@ class CommitCoverageAnalyzer:
         ]
         
         # Add unified system includes (avoiding conflicts and duplicates)
-        args.extend(self._get_unified_system_includes())
+        args.extend(self._get_comprehensive_system_includes())
         
         return args
 
-    def _get_unified_system_includes(self) -> List[str]:
-        """Get unified system include paths avoiding conflicts and duplicates."""
-        includes = []
-        added_paths = set()
-        
-        # Get the primary GCC version to use consistently
-        primary_gcc_version = None
-        try:
-            gcc_version = subprocess.run(['gcc', '-dumpversion'], capture_output=True, text=True).stdout.strip()
-            if gcc_version:
-                primary_gcc_version = gcc_version
-                print(f"DEBUG_UNIFIED_GCC: Using primary GCC version {primary_gcc_version}")
-        except Exception:
-            pass
-        
-        # Essential system paths (always include these first)
-        essential_paths = [
-            '/usr/include',
-            '/usr/local/include',
-            '/usr/include/x86_64-linux-gnu',
-        ]
-        
-        for path in essential_paths:
-            if os.path.isdir(path) and path not in added_paths:
-                includes.extend(['-isystem', path])
-                added_paths.add(path)
-                print(f"DEBUG_UNIFIED_ESSENTIAL: Added {path}")
-        
-        # Add primary GCC version paths (only if we have a primary version)
-        if primary_gcc_version:
-            gcc_paths = [
-                f'/usr/include/c++/{primary_gcc_version}',
-                f'/usr/include/c++/{primary_gcc_version}/backward',
-                f'/usr/lib/gcc/x86_64-linux-gnu/{primary_gcc_version}/include',
-                f'/usr/lib/gcc/x86_64-linux-gnu/{primary_gcc_version}/include-fixed',
-            ]
-            
-            for path in gcc_paths:
-                if os.path.isdir(path) and path not in added_paths:
-                    includes.extend(['-isystem', path])
-                    added_paths.add(path)
-                    print(f"DEBUG_UNIFIED_GCC: Added {path}")
-        
-        # Add GCC toolchain support
-        includes.extend(['--gcc-toolchain=/usr'])
-        
-        # Add clang resource directory if available
-        crd = self._clang_resource_dir()
-        if crd:
-            includes.extend(['-resource-dir', crd])
-            print(f"DEBUG_UNIFIED_CLANG: Added resource dir {crd}")
-        
-        # Ensure C standard library is explicitly available
-        c_stdlib_paths = [
-            '/usr/include',
-            f'/usr/lib/gcc/x86_64-linux-gnu/{primary_gcc_version}/include' if primary_gcc_version else '/usr/lib/gcc/x86_64-linux-gnu/13/include',
-        ]
-        
-        for path in c_stdlib_paths:
-            if os.path.isdir(path) and path not in added_paths:
-                includes.extend(['-isystem', path])
-                added_paths.add(path)
-                print(f"DEBUG_UNIFIED_C_STDLIB: Added C stdlib path {path}")
-                break  # Use the first available path
-        
-        print(f"DEBUG_UNIFIED_TOTAL: Added {len(includes)} total include flags")
-        return includes
 
     def _detect_gcc_version_conflicts(self) -> Dict[str, List[str]]:
         """Detect GCC 14 include paths to ensure consistency."""
