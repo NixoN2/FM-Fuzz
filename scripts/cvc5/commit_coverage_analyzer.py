@@ -165,8 +165,6 @@ class CommitCoverageAnalyzer:
         print(f"DEBUG_CLANG: Starting clang parsing of {file_path}")
         
         
-        # Detect GCC version conflicts
-        gcc_versions = self._detect_gcc_version_conflicts()
         
         try:
             index = clang.cindex.Index.create()
@@ -177,10 +175,8 @@ class CommitCoverageAnalyzer:
             print(f"DEBUG_FINAL_ARGS: {len(args)} args, includes: {args[-20:]}")  # Show last 20 (includes)
             
             # Test clang compilation with the args
-            self._test_clang_compilation(args)
             
             # Test GCC version compatibility
-            self._test_gcc_version_compatibility(args)
             
             tu = index.parse(file_path, args=args)
             
@@ -560,8 +556,6 @@ class CommitCoverageAnalyzer:
             return []
         
         
-        # Detect GCC version conflicts
-        gcc_versions = self._detect_gcc_version_conflicts()
         
         try:
             index = clang.cindex.Index.create()
@@ -571,10 +565,8 @@ class CommitCoverageAnalyzer:
             print(f"DEBUG_FINAL_ARGS: {len(args)} args, includes: {args[-20:]}")  # Show last 20 (includes)
 
             # Test clang compilation with the args
-            self._test_clang_compilation(args)
             
             # Test GCC version compatibility
-            self._test_gcc_version_compatibility(args)
 
             tu = index.parse(file_path, args=args, unsaved_files=[(file_path, source_text)])
             # Print diagnostics similar to extract_functions_with_clang for visibility
