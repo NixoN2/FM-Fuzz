@@ -37,16 +37,13 @@ jobs:
           echo "Installing essential development packages..."
           sudo apt-get update
           
-          # Install comprehensive development packages for multiple GCC versions
+          # Install ONLY GCC 14 and essential packages (remove conflicting versions)
           sudo apt-get install -y \
             build-essential \
             libc6-dev \
             gcc \
             g++ \
             libstdc++-14-dev \
-            libstdc++-13-dev \
-            libstdc++-12-dev \
-            libstdc++-11-dev \
             libc++-dev \
             libc++abi-dev
           
@@ -58,9 +55,6 @@ jobs:
           
           echo "=== C++ Standard Library Headers ==="
           ls -la /usr/include/c++/14/iostream || echo "GCC 14 iostream not found"
-          ls -la /usr/include/c++/13/iostream || echo "GCC 13 iostream not found"
-          ls -la /usr/include/c++/12/iostream || echo "GCC 12 iostream not found"
-          ls -la /usr/include/c++/11/iostream || echo "GCC 11 iostream not found"
           
           echo "=== Checking which GCC version clang will use ==="
           clang++ -v 2>&1 | grep -E "(Found candidate|Selected)" || echo "No GCC detection info"
@@ -68,34 +62,11 @@ jobs:
           echo "=== Testing basic compilation ==="
           echo '#include <iostream>' | clang++ -x c++ - -v 2>&1 | grep -E "(search starts here|End of search list)" || echo "No include search info"
           
-          echo "=== Installing specific GCC version if needed ==="
-          # Extract the GCC version that clang is trying to use
-          GCC_VERSION=$(clang++ -v 2>&1 | grep "Selected GCC installation" | sed 's/.*gcc\/x86_64-linux-gnu\///' | cut -d'/' -f1 || echo "")
-          if [ -n "$GCC_VERSION" ]; then
-            echo "Clang is trying to use GCC version: $GCC_VERSION"
-            # Install the specific libstdc++ version if not already installed
-            case "$GCC_VERSION" in
-              "14")
-                sudo apt-get install -y libstdc++-14-dev || echo "libstdc++-14-dev already installed or not available"
-                ;;
-              "13")
-                sudo apt-get install -y libstdc++-13-dev || echo "libstdc++-13-dev already installed or not available"
-                ;;
-              "12")
-                sudo apt-get install -y libstdc++-12-dev || echo "libstdc++-12-dev already installed or not available"
-                ;;
-              "11")
-                sudo apt-get install -y libstdc++-11-dev || echo "libstdc++-11-dev already installed or not available"
-                ;;
-              *)
-                echo "Unknown GCC version $GCC_VERSION, trying to install all versions"
-                sudo apt-get install -y libstdc++-14-dev libstdc++-13-dev libstdc++-12-dev libstdc++-11-dev || true
-                ;;
-            esac
-          else
-            echo "Could not determine GCC version, installing all versions"
-            sudo apt-get install -y libstdc++-14-dev libstdc++-13-dev libstdc++-12-dev libstdc++-11-dev || true
-          fi
+          echo "=== Verifying GCC 14 installation ==="
+          # Verify that GCC 14 is properly installed
+          gcc --version
+          echo "GCC 14 libstdc++ headers:"
+          ls -la /usr/include/c++/14/ || echo "GCC 14 headers not found"
       
       - name: Install Python dependencies
         run: |
@@ -193,32 +164,29 @@ jobs:
             clang++ -std=c++17 -v test_compile.cpp -o test_compile 2>&1 | head -20
           fi
           
-          echo "Testing clang++ with system includes..."
-          if clang++ -std=c++17 -isystem /usr/include -isystem /usr/include/c++/14 -isystem /usr/include/c++/13 -isystem /usr/include/x86_64-linux-gnu test_compile.cpp -o test_compile_system; then
-            echo "✅ System include compilation succeeded"
+          echo "Testing clang++ with GCC 14 toolchain (recommended approach)..."
+          if clang++ -std=c++17 --gcc-toolchain=/usr test_compile.cpp -o test_compile_gcc14; then
+            echo "✅ GCC 14 toolchain compilation succeeded"
           else
-            echo "❌ System include compilation failed"
+            echo "❌ GCC 14 toolchain compilation failed"
           fi
           
-          echo "Testing clang++ with GCC toolchain..."
-          if clang++ -std=c++17 --gcc-toolchain=/usr test_compile.cpp -o test_compile_gcc; then
-            echo "✅ GCC toolchain compilation succeeded"
-          else
-            echo "❌ GCC toolchain compilation failed"
-          fi
-          
-          echo "Testing clang++ with libc++..."
+          echo "Testing clang++ with libc++ (alternative approach)..."
           if clang++ -std=c++17 -stdlib=libc++ test_compile.cpp -o test_compile_libcxx; then
             echo "✅ libc++ compilation succeeded"
           else
             echo "❌ libc++ compilation failed"
           fi
           
+          
           echo "Cleaning up test files..."
-          rm -f test_compile test_compile_system test_compile_gcc test_compile_libcxx test_compile.cpp
+          rm -f test_compile test_compile_gcc14 test_compile_libcxx test_compile.cpp
 
       - name: Build CVC5 with coverage
         run: |
+          # Set environment variables to ensure clang uses GCC 14 toolchain
+          export CXX="clang++ --gcc-toolchain=/usr"
+          export CC="clang --gcc-toolchain=/usr"
           ./scripts/cvc5/build.sh --coverage
       
       - name: Download coverage mapping artifact from latest successful run
