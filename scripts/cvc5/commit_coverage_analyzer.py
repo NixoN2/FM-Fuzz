@@ -464,6 +464,9 @@ class CommitCoverageAnalyzer:
         """
         return self.git.get_changed_lines(diff_text)
     
+    def get_file_text_at_commit(self, rev: Optional[str], path: str) -> Optional[str]:
+        return self.git.get_file_text_at_commit(rev, path)
+    
     def get_function_signature(self, cursor) -> Optional[str]:
         """Extract gcov-style function signature from a clang cursor"""
         try:
