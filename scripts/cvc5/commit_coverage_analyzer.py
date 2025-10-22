@@ -449,24 +449,6 @@ class CommitCoverageAnalyzer:
                 pass
         # Fallback
         return self._build_clang_args()
-    
-    def get_commit_info(self, commit_hash: str) -> Optional[Dict]:
-        """Get basic commit information"""
-        return self.git.get_commit_info(commit_hash)
-    
-    def get_commit_diff(self, commit_hash: str) -> str:
-        """Get the unified diff for a commit with zero context for precise line tracking."""
-        return self.git.get_commit_diff(commit_hash)
-    
-    def get_changed_lines(self, diff_text: str) -> Dict[str, Set[int]]:
-        """Extract precise changed new-file line numbers per file from a -U0 diff.
-        Tracks only '+' lines (added/modified) and maps them to new file line numbers.
-        """
-        return self.git.get_changed_lines(diff_text)
-    
-    def get_file_text_at_commit(self, rev: Optional[str], path: str) -> Optional[str]:
-        return self.git.get_file_text_at_commit(rev, path)
-    
     def get_function_signature(self, cursor) -> Optional[str]:
         """Extract gcov-style function signature from a clang cursor"""
         try:
@@ -681,13 +663,13 @@ class CommitCoverageAnalyzer:
         Includes functions whose body overlaps changed lines or whose signature changed.
         Excludes pure moves (identical normalized body before/after).
         """
-        commit_info = self.get_commit_info(commit_hash)
+        commit_info = self.git.get_commit_info(commit_hash)
         if not commit_info:
             return []
 
         # Get diff and changed line ranges on the new side
-        diff_text = self.get_commit_diff(commit_hash)
-        changed_files_lines = self.get_changed_lines(diff_text)
+        diff_text = self.git.get_commit_diff(commit_hash)
+        changed_files_lines = self.git.get_changed_lines(diff_text)
 
         # Parent commit (if any)
         try:
@@ -702,10 +684,10 @@ class CommitCoverageAnalyzer:
             if not file_path.endswith(('.cpp', '.cc', '.c', '.h', '.hpp')):
                 continue
 
-            after_src = self.get_file_text_at_commit(commit_hash, file_path)
+            after_src = self.git.get_file_text_at_commit(commit_hash, file_path)
             if after_src is None:
                 continue
-            before_src = self.get_file_text_at_commit(parent_hash, file_path) if parent_hash else None
+            before_src = self.git.get_file_text_at_commit(parent_hash, file_path) if parent_hash else None
 
             # Parse functions from in-memory contents
             after_funcs = self.parse_functions_from_text(file_path, after_src)
