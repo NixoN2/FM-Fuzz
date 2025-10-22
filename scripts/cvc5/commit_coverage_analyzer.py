@@ -164,8 +164,6 @@ class CommitCoverageAnalyzer:
         
         print(f"DEBUG_CLANG: Starting clang parsing of {file_path}")
         
-        # Check system headers first
-        self._check_system_headers()
         
         # Detect GCC version conflicts
         gcc_versions = self._detect_gcc_version_conflicts()
@@ -632,8 +630,6 @@ class CommitCoverageAnalyzer:
         if not CLANG_AVAILABLE or source_text is None:
             return []
         
-        # Check system headers first
-        self._check_system_headers()
         
         # Detect GCC version conflicts
         gcc_versions = self._detect_gcc_version_conflicts()
@@ -1023,21 +1019,12 @@ class CommitCoverageAnalyzer:
         return includes
 
     def _get_comprehensive_system_includes(self) -> List[str]:
-        """Get comprehensive system include paths including GCC toolchain support."""
+        """Get comprehensive system include paths using only GCC 14 toolchain."""
         includes = []
         
-        # Add GCC toolchain support
+        # Add GCC toolchain support (critical for consistency with workflow)
         includes.extend(['--gcc-toolchain=/usr'])
-        
-        # Get the primary GCC version to avoid conflicts
-        primary_gcc_version = None
-        try:
-            gcc_version = subprocess.run(['gcc', '-dumpversion'], capture_output=True, text=True).stdout.strip()
-            if gcc_version:
-                primary_gcc_version = gcc_version
-                print(f"DEBUG_PRIMARY_GCC: Using GCC version {primary_gcc_version}")
-        except Exception:
-            pass
+        print("DEBUG_GCC14_TOOLCHAIN: Added --gcc-toolchain=/usr")
         
         # Standard system includes (always include these)
         system_paths = [
@@ -1046,18 +1033,19 @@ class CommitCoverageAnalyzer:
             '/usr/include/x86_64-linux-gnu',
         ]
         
-        # Add primary GCC version paths first - ONLY use the primary version to avoid conflicts
-        if primary_gcc_version:
-            primary_paths = [
-                f'/usr/include/c++/{primary_gcc_version}',
-                f'/usr/include/c++/{primary_gcc_version}/backward',
-                f'/usr/lib/gcc/x86_64-linux-gnu/{primary_gcc_version}/include',
-                f'/usr/lib/gcc/x86_64-linux-gnu/{primary_gcc_version}/include-fixed',
-            ]
-            # Only add paths that exist and are from the primary GCC version
-            for path in primary_paths:
-                if os.path.isdir(path):
-                    system_paths.append(path)
+        # GCC 14 specific paths (only GCC 14, no other versions)
+        gcc14_paths = [
+            '/usr/include/c++/14',
+            '/usr/include/c++/14/backward',
+            '/usr/lib/gcc/x86_64-linux-gnu/14/include',
+            '/usr/lib/gcc/x86_64-linux-gnu/14/include-fixed',
+        ]
+        
+        # Add GCC 14 paths that exist
+        for path in gcc14_paths:
+            if os.path.isdir(path):
+                system_paths.append(path)
+                print(f"DEBUG_GCC14_PATH: Found GCC 14 path {path}")
         
         # Add verified paths (avoid duplicates)
         added_paths = set()
@@ -1065,25 +1053,26 @@ class CommitCoverageAnalyzer:
             if os.path.isdir(path) and path not in added_paths:
                 includes.extend(['-isystem', path])
                 added_paths.add(path)
-                print(f"DEBUG_SYSTEM_INCLUDE: Added {path}")
+                print(f"DEBUG_GCC14_INCLUDE: Added {path}")
         
+        print(f"DEBUG_GCC14_TOTAL: Added {len(includes)} total include flags")
         return includes
 
     def _ensure_c_stdlib(self) -> List[str]:
-        """Ensure C standard library headers are available."""
+        """Ensure C standard library headers are available using GCC 14."""
         includes = []
         
-        # Add essential C standard library paths
+        # Add essential C standard library paths (GCC 14 only)
         c_stdlib_paths = [
-            '/usr/include',
-            '/usr/lib/gcc/x86_64-linux-gnu/13/include',  # GCC 13 C headers
-            '/usr/lib/gcc/x86_64-linux-gnu/12/include',  # GCC 12 C headers (fallback)
+            '/usr/include',                                    # Primary C standard library
+            '/usr/lib/gcc/x86_64-linux-gnu/14/include',      # GCC 14 C headers
+            '/usr/include/x86_64-linux-gnu',                  # Architecture-specific C headers
         ]
         
         for path in c_stdlib_paths:
             if os.path.isdir(path):
                 includes.extend(['-isystem', path])
-                print(f"DEBUG_C_STDLIB: Added C stdlib path: {path}")
+                print(f"DEBUG_GCC14_C_STDLIB: Added C stdlib path: {path}")
                 break  # Use the first available path
         
         return includes
@@ -1207,30 +1196,32 @@ class CommitCoverageAnalyzer:
         return includes
 
     def _detect_gcc_version_conflicts(self) -> Dict[str, List[str]]:
-        """Detect available GCC versions and their include paths to avoid conflicts."""
+        """Detect GCC 14 include paths to ensure consistency."""
         gcc_versions = {}
         
         try:
-            # Find all GCC versions
-            for version in ['13', '12', '14', '11', '10']:
-                version_paths = []
-                
-                # Check C++ headers
-                cpp_path = f'/usr/include/c++/{version}'
-                if os.path.isdir(cpp_path):
-                    version_paths.append(cpp_path)
-                
-                # Check GCC include paths
-                gcc_include = f'/usr/lib/gcc/x86_64-linux-gnu/{version}/include'
-                if os.path.isdir(gcc_include):
-                    version_paths.append(gcc_include)
-                
-                if version_paths:
-                    gcc_versions[version] = version_paths
-                    print(f"DEBUG_GCC_VERSION: Found GCC {version} with paths: {version_paths}")
+            # Only check for GCC 14 (matching workflow's libstdc++-14-dev)
+            version = '14'
+            version_paths = []
+            
+            # Check C++ headers
+            cpp_path = f'/usr/include/c++/{version}'
+            if os.path.isdir(cpp_path):
+                version_paths.append(cpp_path)
+            
+            # Check GCC include paths
+            gcc_include = f'/usr/lib/gcc/x86_64-linux-gnu/{version}/include'
+            if os.path.isdir(gcc_include):
+                version_paths.append(gcc_include)
+            
+            if version_paths:
+                gcc_versions[version] = version_paths
+                print(f"DEBUG_GCC14_VERSION: Found GCC {version} with paths: {version_paths}")
+            else:
+                print("DEBUG_GCC14_VERSION: Warning - GCC 14 paths not found")
         
         except Exception as e:
-            print(f"DEBUG_GCC_VERSION_ERROR: {e}")
+            print(f"DEBUG_GCC14_VERSION_ERROR: {e}")
         
         return gcc_versions
 
@@ -1255,30 +1246,6 @@ class CommitCoverageAnalyzer:
             print(f"DEBUG_GCC_COMPAT: ❌ GCC compatibility test error: {e}")
             return False
 
-    def _check_system_headers(self) -> bool:
-        """Check if essential system headers are available."""
-        essential_headers = [
-            '/usr/include/stdlib.h',
-            '/usr/include/stdio.h',
-            '/usr/include/string.h',
-            '/usr/include/c++/13/iostream',
-            '/usr/include/c++/13/vector',
-        ]
-        
-        missing_headers = []
-        for header in essential_headers:
-            if not os.path.exists(header):
-                missing_headers.append(header)
-        
-        if missing_headers:
-            print(f"DEBUG_MISSING_HEADERS: Missing system headers:")
-            for header in missing_headers:
-                print(f"DEBUG_MISSING_HEADER: {header}")
-            print("DEBUG_MISSING_HEADERS: Consider installing: sudo apt-get install build-essential libc6-dev g++")
-            return False
-        
-        print("DEBUG_HEADERS: All essential system headers found")
-        return True
 
     def _test_clang_compilation(self, args: List[str]) -> bool:
         """Test if clang can compile a simple C++ program with the given args."""

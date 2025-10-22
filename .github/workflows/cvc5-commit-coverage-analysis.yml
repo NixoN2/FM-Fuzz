@@ -211,8 +211,8 @@ jobs:
         run: |
           # Copy the tool source into this repo workspace to build against compile_commands.json
           cp ${{ github.workspace }}/scripts/cvc5/sig_dump.cpp ./sig_dump.cpp
-          # Build using installed LLVM/Clang
-          clang++ -std=c++17 $(llvm-config --cxxflags) sig_dump.cpp -o sig_dump -L"$LLVM_PATH/lib" -Wl,-rpath,"$LLVM_PATH/lib" $(llvm-config --ldflags --system-libs --libs) -lclang-cpp
+          # Build using installed LLVM/Clang with GCC 14 toolchain
+          clang++ -std=c++17 --gcc-toolchain=/usr $(llvm-config --cxxflags) sig_dump.cpp -o sig_dump -L"$LLVM_PATH/lib" -Wl,-rpath,"$LLVM_PATH/lib" $(llvm-config --ldflags --system-libs --libs) -lclang-cpp
 
       - name: Run signature dumper on changed files (HEAD)
         working-directory: cvc5
