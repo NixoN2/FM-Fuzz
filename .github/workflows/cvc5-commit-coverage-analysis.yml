@@ -29,33 +29,69 @@ jobs:
         run: |
           clang++ --version
           clang -print-resource-dir
-      
-      - name: Build CVC5 with coverage
-        run: |
-          ./scripts/cvc5/build.sh --coverage
-      
-      - name: Download coverage mapping artifact from latest successful run
-        uses: dawidd6/action-download-artifact@v3
-        with:
-          name: coverage-mapping-final
-          path: .
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          workflow: cvc5-coverage-analysis.yml
-      
-      - name: Extract coverage mapping
-        run: |
-          gunzip coverage_mapping_merged.json.gz
-          ls -la coverage_mapping_merged.json
+          echo "=== Clang GCC Detection ==="
+          clang++ -v 2>&1 | grep -E "(Found candidate|Selected)" || echo "No GCC detection info"
       
       - name: Install system development packages
         run: |
           echo "Installing essential development packages..."
           sudo apt-get update
-          sudo apt-get install -y build-essential libc6-dev g++ libstdc++-13-dev
+          
+          # Install comprehensive development packages for multiple GCC versions
+          sudo apt-get install -y \
+            build-essential \
+            libc6-dev \
+            gcc \
+            g++ \
+            libstdc++-13-dev \
+            libstdc++-12-dev \
+            libstdc++-11-dev \
+            libc++-dev \
+            libc++abi-dev
+          
           echo "Verifying installation..."
-          ls -la /usr/include/stdlib.h || echo "stdlib.h not found after installation"
-          ls -la /usr/include/c++/13/iostream || echo "iostream not found after installation"
-
+          echo "=== C Standard Library Headers ==="
+          ls -la /usr/include/stdlib.h || echo "stdlib.h not found"
+          ls -la /usr/include/stdio.h || echo "stdio.h not found"
+          ls -la /usr/include/string.h || echo "string.h not found"
+          
+          echo "=== C++ Standard Library Headers ==="
+          ls -la /usr/include/c++/13/iostream || echo "GCC 13 iostream not found"
+          ls -la /usr/include/c++/12/iostream || echo "GCC 12 iostream not found"
+          ls -la /usr/include/c++/11/iostream || echo "GCC 11 iostream not found"
+          
+          echo "=== Checking which GCC version clang will use ==="
+          clang++ -v 2>&1 | grep -E "(Found candidate|Selected)" || echo "No GCC detection info"
+          
+          echo "=== Testing basic compilation ==="
+          echo '#include <iostream>' | clang++ -x c++ - -v 2>&1 | grep -E "(search starts here|End of search list)" || echo "No include search info"
+          
+          echo "=== Installing specific GCC version if needed ==="
+          # Extract the GCC version that clang is trying to use
+          GCC_VERSION=$(clang++ -v 2>&1 | grep "Selected GCC installation" | sed 's/.*gcc\/x86_64-linux-gnu\///' | cut -d'/' -f1 || echo "")
+          if [ -n "$GCC_VERSION" ]; then
+            echo "Clang is trying to use GCC version: $GCC_VERSION"
+            # Install the specific libstdc++ version if not already installed
+            case "$GCC_VERSION" in
+              "13")
+                sudo apt-get install -y libstdc++-13-dev || echo "libstdc++-13-dev already installed or not available"
+                ;;
+              "12")
+                sudo apt-get install -y libstdc++-12-dev || echo "libstdc++-12-dev already installed or not available"
+                ;;
+              "11")
+                sudo apt-get install -y libstdc++-11-dev || echo "libstdc++-11-dev already installed or not available"
+                ;;
+              *)
+                echo "Unknown GCC version $GCC_VERSION, trying to install all versions"
+                sudo apt-get install -y libstdc++-13-dev libstdc++-12-dev libstdc++-11-dev || true
+                ;;
+            esac
+          else
+            echo "Could not determine GCC version, installing all versions"
+            sudo apt-get install -y libstdc++-13-dev libstdc++-12-dev libstdc++-11-dev || true
+          fi
+      
       - name: Install Python dependencies
         run: |
           pip install gitpython unidiff "libclang==17.0.6"
@@ -144,17 +180,55 @@ jobs:
           EOF
           
           echo "Testing basic clang++ compilation..."
-          clang++ -std=c++17 test_compile.cpp -o test_compile || echo "Basic compilation failed"
+          if clang++ -std=c++17 test_compile.cpp -o test_compile; then
+            echo "✅ Basic compilation succeeded"
+          else
+            echo "❌ Basic compilation failed"
+            echo "Trying with verbose output:"
+            clang++ -std=c++17 -v test_compile.cpp -o test_compile 2>&1 | head -20
+          fi
           
           echo "Testing clang++ with system includes..."
-          clang++ -std=c++17 -isystem /usr/include -isystem /usr/include/c++/13 -isystem /usr/include/x86_64-linux-gnu test_compile.cpp -o test_compile_system || echo "System include compilation failed"
+          if clang++ -std=c++17 -isystem /usr/include -isystem /usr/include/c++/13 -isystem /usr/include/x86_64-linux-gnu test_compile.cpp -o test_compile_system; then
+            echo "✅ System include compilation succeeded"
+          else
+            echo "❌ System include compilation failed"
+          fi
           
           echo "Testing clang++ with GCC toolchain..."
-          clang++ -std=c++17 --gcc-toolchain=/usr test_compile.cpp -o test_compile_gcc || echo "GCC toolchain compilation failed"
+          if clang++ -std=c++17 --gcc-toolchain=/usr test_compile.cpp -o test_compile_gcc; then
+            echo "✅ GCC toolchain compilation succeeded"
+          else
+            echo "❌ GCC toolchain compilation failed"
+          fi
+          
+          echo "Testing clang++ with libc++..."
+          if clang++ -std=c++17 -stdlib=libc++ test_compile.cpp -o test_compile_libcxx; then
+            echo "✅ libc++ compilation succeeded"
+          else
+            echo "❌ libc++ compilation failed"
+          fi
           
           echo "Cleaning up test files..."
-          rm -f test_compile test_compile_system test_compile_gcc test_compile.cpp
+          rm -f test_compile test_compile_system test_compile_gcc test_compile_libcxx test_compile.cpp
+
+      - name: Build CVC5 with coverage
+        run: |
+          ./scripts/cvc5/build.sh --coverage
       
+      - name: Download coverage mapping artifact from latest successful run
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          name: coverage-mapping-final
+          path: .
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: cvc5-coverage-analysis.yml
+      
+      - name: Extract coverage mapping
+        run: |
+          gunzip coverage_mapping_merged.json.gz
+          ls -la coverage_mapping_merged.json
+
       - name: Run commit coverage analysis
         working-directory: cvc5
         run: ${{ github.workspace }}/scripts/cvc5/run_commit_coverage_analysis.sh 15 ${{ github.workspace }}/scripts/cvc5/commit_coverage_analyzer.py ../coverage_mapping_merged.json
