@@ -61,7 +61,6 @@ except Exception:
 @dataclass
 class FunctionInfo:
     signature: str
-    alt_signature: Optional[str]
     start: int
     end: int
     file: str
@@ -143,9 +142,8 @@ class GitHelper:
             return None
 
 class CoverageMatcher:
-    def __init__(self, coverage_map: Dict[str, Set[str]], alt_signature_map: Dict[str, str]):
+    def __init__(self, coverage_map: Dict[str, Set[str]]):
         self.coverage_map = coverage_map
-        self.alt_signature_map = alt_signature_map
 
     def _strip_line_suffix(self, s: str) -> str:
         if ':' in s:
@@ -198,78 +196,16 @@ class CoverageMatcher:
         suffix = s[close_idx:]
         return prefix, params_str, suffix
 
-    def normalize_signature_for_compare(self, sig: str) -> str:
-        prefix, params_str, suffix = self._split_signature_parts(sig)
-        if params_str == '':
-            s = self._strip_line_suffix(sig)
-            s = re.sub(r"\[abi:[^\]]+\]", "", s)
-            s = re.sub(r"\s*::\s*", "::", s)
-            return re.sub(r"\s+", " ", s).strip()
-        params: List[str] = []
-        buf: List[str] = []
-        angle = 0
-        paren = 0
-        for ch in params_str:
-            if ch == '<':
-                angle += 1
-            elif ch == '>':
-                angle = max(0, angle - 1)
-            elif ch == '(':
-                paren += 1
-            elif ch == ')':
-                paren = max(0, paren - 1)
-            if ch == ',' and angle == 0 and paren == 0:
-                params.append(''.join(buf).strip())
-                buf = []
-            else:
-                buf.append(ch)
-        if buf:
-            params.append(''.join(buf).strip())
-
-        def normalize_param(p: str) -> str:
-            p = re.sub(r"\s+", " ", p).strip()
-            p = re.sub(r"(\b[\w:<>*&\s]+?)\s+([A-Za-z_][A-Za-z0-9_]*)$", r"\1", p)
-            has_leading_const = p.startswith('const ')
-            if has_leading_const:
-                p = p[len('const '):].strip()
-            m2 = re.match(r'^(.*?)(\s*[&*]+)$', p)
-            if m2:
-                base = m2.group(1).strip()
-                syms = m2.group(2).replace(' ', '')
-            else:
-                base = p
-                syms = ''
-            if has_leading_const:
-                p = f"{base} const{syms}"
-            else:
-                p = f"{base}{syms}"
-            p = re.sub(r"\s+([&*])", r"\1", p)
-            p = re.sub(r"\s*::\s*", "::", p)
-            p = re.sub(r"<\s*", "<", p)
-            # Don't remove spaces before > to preserve template spacing like "> >"
-            # p = re.sub(r"\s*>", ">", p)  # Commented out to preserve template spacing
-            return p
-
-        norm_params = [normalize_param(p) for p in params if p != '']
-        norm_params_str = ', '.join(norm_params)
-        s = f"{prefix}{norm_params_str}{suffix}"
-        s = self._strip_line_suffix(s)
-        s = re.sub(r"\[abi:[^\]]+\]", "", s)
-        s = re.sub(r"\s+", " ", s)
-        s = re.sub(r"\s*::\s*", "::", s)
-        s = re.sub(r",\s*", ", ", s)
-        s = re.sub(r"\s+([&*])", r"\1", s)
-        return s.strip()
+    # Removed matcher-side normalization; signatures should already be formatted like mapping
 
     def match(self, functions: List[str]) -> Dict:
         cov_full_to_tests: Dict[str, Set[str]] = {}
         cov_sig_to_tests: Dict[str, Set[str]] = {}
         for k, tests in self.coverage_map.items():
             path, sig = self._split_path_and_sig(k)
-            norm_sig = self.normalize_signature_for_compare(sig)
-            norm_full = f"{path}:{norm_sig}"
-            cov_full_to_tests.setdefault(norm_full, set()).update(tests)
-            cov_sig_to_tests.setdefault(norm_sig, set()).update(tests)
+            full = f"{path}:{sig}"
+            cov_full_to_tests.setdefault(full, set()).update(tests)
+            cov_sig_to_tests.setdefault(sig, set()).update(tests)
         cov_sigs_list = list(cov_sig_to_tests.keys())
 
         all_covering_tests = set()
@@ -286,7 +222,7 @@ class CoverageMatcher:
             matching_tests = set()
             match_type = "none"
             our_path, our_sig = self._split_path_and_sig(func)
-            our_sig_norm = self.normalize_signature_for_compare(our_sig)
+            our_sig_norm = self._strip_line_suffix(our_sig)
             our_full_norm = f"{our_path}:{our_sig_norm}"
 
             if our_full_norm in cov_full_to_tests:
@@ -314,35 +250,6 @@ class CoverageMatcher:
                         match_type = f"fuzzy:{best_ratio:.2f}"
                 except Exception:
                     pass
-                if not matching_tests and func in self.alt_signature_map:
-                    alt_func = self.alt_signature_map[func]
-                    alt_path, alt_sig = self._split_path_and_sig(alt_func)
-                    alt_sig_norm = self.normalize_signature_for_compare(alt_sig)
-                    alt_full_norm = f"{alt_path}:{alt_sig_norm}"
-                    alt_tests = set()
-                    alt_type = "none"
-                    if alt_full_norm in cov_full_to_tests:
-                        alt_tests = cov_full_to_tests[alt_full_norm]
-                        alt_type = "alt_direct"
-                    elif alt_sig_norm in cov_sig_to_tests:
-                        alt_tests = cov_sig_to_tests[alt_sig_norm]
-                        alt_type = "alt_path_removed"
-                    else:
-                        try:
-                            best = max(
-                                ((cov_sig, difflib.SequenceMatcher(None, alt_sig_norm, cov_sig).ratio()) for cov_sig in cov_sigs_list),
-                                key=lambda x: x[1],
-                                default=(None, 0.0)
-                            )
-                            best_sig, best_ratio = best
-                            if best_sig is not None and best_ratio >= 0.95:
-                                alt_tests = cov_sig_to_tests.get(best_sig, set())
-                                alt_type = f"alt_fuzzy:{best_ratio:.2f}"
-                        except Exception:
-                            pass
-                    if alt_tests:
-                        matching_tests.update(alt_tests)
-                        match_type = alt_type
 
             if matching_tests:
                 all_covering_tests.update(matching_tests)
@@ -379,9 +286,6 @@ class CommitCoverageAnalyzer:
         self.repo_path = Path(repo_path)
         self.repo = git.Repo(repo_path)
         self.coverage_map = None
-        # Map from primary mapping entry (path:signature) to an alternative
-        # spelling-based signature mapping entry for debug-only matching.
-        self.alt_signature_map: Dict[str, str] = {}
         self.compdb = None
         self.compdb_dir: Optional[str] = None
         self.git = GitHelper(self.repo_path, self.repo)
@@ -477,40 +381,9 @@ class CommitCoverageAnalyzer:
             
             line = cursor.location.line
             signature = f"{qualified_name}({param_str}){abi_info}{const_suffix}:{line}"
-            return signature
+            # Normalize once to match coverage mapping formatting
+            return self._normalize_signature(signature)
         except Exception:
-            return None
-
-    def get_function_signature_spelling(self, cursor) -> Optional[str]:
-        """Alternative signature that prefers type.spelling to preserve templates.
-        Debug-only; not used for matching.
-        """
-        try:
-            name = cursor.spelling
-            if not name:
-                return None
-
-            qualified_name = self.get_qualified_name(cursor)
-            params = []
-            for child in cursor.get_children():
-                if child.kind == clang.cindex.CursorKind.PARM_DECL:
-                    t = child.type
-                    # Prefer the original spelling to preserve templates like std::vector<...>
-                    param_type = t.spelling or t.get_canonical().spelling
-                    # Light whitespace cleanup only
-                    param_type = param_type.replace("  ", " ").strip()
-                    params.append(param_type)
-
-            param_str = ", ".join(params)
-            const_suffix = " const" if cursor.is_const_method() else ""
-            abi_info = ""
-            if hasattr(cursor, 'mangled_name') and cursor.mangled_name:
-                if 'abi:cxx11' in str(cursor.mangled_name):
-                    abi_info = "[abi:cxx11]"
-            line = cursor.location.line
-            signature = f"{qualified_name}({param_str}){abi_info}{const_suffix}:{line}"
-            return signature
-        except Exception as e:
             return None
 
     def _render_param_type(self, tp) -> str:
@@ -579,35 +452,6 @@ class CommitCoverageAnalyzer:
             pass
         return None
 
-    def get_function_signature_textual(self, cursor) -> Optional[str]:
-        """Alternative signature using tokens to preserve complex template types from the source."""
-        try:
-            qualified_name = self.get_qualified_name(cursor)
-            params = []
-            for child in cursor.get_children():
-                if child.kind == clang.cindex.CursorKind.PARM_DECL:
-                    tokens = list(child.get_tokens())
-                    if not tokens:
-                        continue
-                    text = " ".join(t.spelling for t in tokens)
-                    # Remove default initializers
-                    if '=' in text:
-                        text = text.split('=')[0].strip()
-                    # Remove parameter identifier at the end (best-effort)
-                    name = child.spelling or ''
-                    if name:
-                        # remove last occurrence of name as a whole word
-                        import re
-                        text = re.sub(r"\b" + re.escape(name) + r"\b\s*$", "", text).strip()
-                    # Collapse spaces
-                    text = re.sub(r"\s+", " ", text).strip()
-                    params.append(text)
-            param_str = ", ".join(params)
-            const_suffix = " const" if cursor.is_const_method() else ""
-            line = cursor.location.line
-            return f"{qualified_name}({param_str}){const_suffix}:{line}"
-        except Exception:
-            return None
     
     def get_qualified_name(self, cursor) -> str:
         """Get the fully qualified name including namespace and class"""
@@ -731,12 +575,6 @@ class CommitCoverageAnalyzer:
                 mapping_entry = f"{file_path}:{f.signature}"
                 changed_functions.append(mapping_entry)
                 print(f"    Selected: {mapping_entry} (overlap=True, sig_changed=False)")
-                alt_sig = f.alt_signature
-                if alt_sig:
-                    alt_entry = f"{file_path}:{alt_sig}"
-                    self.alt_signature_map[mapping_entry] = alt_entry
-                    if alt_sig != f.signature:
-                        print(f"    Selected ALT (debug-only): {alt_entry}")
 
         return changed_functions
 
@@ -763,11 +601,6 @@ class CommitCoverageAnalyzer:
             def visit(n):
                 if n.kind in [clang.cindex.CursorKind.FUNCTION_DECL, clang.cindex.CursorKind.CXX_METHOD] and n.is_definition():
                     sig = self.get_function_signature(n)
-                    alt_sig = self.get_function_signature_spelling(n)
-                    if alt_sig and '(' in alt_sig and ')' in alt_sig:
-                        alt_sig_tokens = self.get_function_signature_textual(n)
-                        if alt_sig_tokens:
-                            alt_sig = alt_sig_tokens
                     node_file = str(n.location.file) if n.location and n.location.file else None
                     if sig and node_file and self.is_cvc5_function(sig):
                         nf = normpath(node_file)
@@ -775,7 +608,6 @@ class CommitCoverageAnalyzer:
                         if nf.endswith(exp):
                             funcs.append(FunctionInfo(
                                 signature=sig,
-                                alt_signature=alt_sig,
                                 start=n.extent.start.line,
                                 end=n.extent.end.line,
                                 file=node_file
@@ -803,6 +635,130 @@ class CommitCoverageAnalyzer:
         code = re.sub(r'\s+', ' ', code).strip()
         return code
 
+    def _normalize_signature(self, full_sig: str) -> str:
+        """Normalize a constructed signature string to match coverage mapping style, once.
+        Preserves trailing :line while normalizing whitespace, namespaces, template spacing,
+        and parameter const placement.
+        """
+        try:
+            # Split off :line suffix if present
+            line_part = ''
+            head = full_sig
+            if ':' in full_sig:
+                base, last = full_sig.rsplit(':', 1)
+                if last.isdigit():
+                    head = base
+                    line_part = f":{last}"
+
+            # Remove ABI tag
+            head = re.sub(r"\[abi:[^\]]+\]", "", head)
+            # Collapse namespace spacing
+            head = re.sub(r"\s*::\s*", "::", head)
+
+            # Find parameter list boundaries on the head (no :line now)
+            s = head
+            open_idx = -1
+            angle = 0
+            for i, ch in enumerate(s):
+                if ch == '<':
+                    angle += 1
+                elif ch == '>':
+                    angle = max(0, angle - 1)
+                elif ch == '(' and angle == 0:
+                    open_idx = i
+                    break
+            if open_idx == -1:
+                # No params? Just collapse spaces and template closers
+                s = re.sub(r"\s+", " ", s)
+                s = s.replace(">>", "> >")
+                return s.strip() + line_part
+
+            paren = 0
+            close_idx = -1
+            for j in range(open_idx, len(s)):
+                c = s[j]
+                if c == '<':
+                    angle += 1
+                elif c == '>':
+                    angle = max(0, angle - 1)
+                elif c == '(':
+                    paren += 1
+                elif c == ')':
+                    paren -= 1
+                    if paren == 0 and angle == 0:
+                        close_idx = j
+                        break
+            if close_idx == -1:
+                s = re.sub(r"\s+", " ", s)
+                s = s.replace(">>", "> >")
+                return s.strip() + line_part
+
+            prefix = s[:open_idx+1]
+            params_str = s[open_idx+1:close_idx]
+            suffix = s[close_idx:]
+
+            # Split top-level parameters
+            params: List[str] = []
+            buf: List[str] = []
+            angle = 0
+            paren = 0
+            for ch in params_str:
+                if ch == '<':
+                    angle += 1
+                elif ch == '>':
+                    angle = max(0, angle - 1)
+                elif ch == '(':
+                    paren += 1
+                elif ch == ')':
+                    paren = max(0, paren - 1)
+                if ch == ',' and angle == 0 and paren == 0:
+                    params.append(''.join(buf).strip())
+                    buf = []
+                else:
+                    buf.append(ch)
+            if buf:
+                params.append(''.join(buf).strip())
+
+            def norm_param(p: str) -> str:
+                p = re.sub(r"\s+", " ", p).strip()
+                # Drop trailing parameter identifiers if any sneaked in
+                p = re.sub(r"(\b[\w:<>*&\s]+?)\s+([A-Za-z_][A-Za-z0-9_]*)$", r"\1", p)
+                # Move leading 'const ' to trailing ' const'
+                leading_const = p.startswith('const ')
+                if leading_const:
+                    p = p[len('const '):].strip()
+                m2 = re.match(r'^(.*?)(\s*[&*]+)$', p)
+                if m2:
+                    base = m2.group(1).strip()
+                    syms = m2.group(2).replace(' ', '')
+                else:
+                    base = p
+                    syms = ''
+                if leading_const:
+                    p = f"{base} const{syms}"
+                else:
+                    p = f"{base}{syms}"
+                # Namespace spacing and pointer/ref spacing
+                p = re.sub(r"\s*::\s*", "::", p)
+                p = re.sub(r"\s+([&*])", r"\1", p)
+                p = re.sub(r"<\s*", "<", p)
+                # Ensure nested template closers have space
+                p = p.replace(">>", "> >")
+                return p
+
+            norm_params = [norm_param(p) for p in params if p != '']
+            norm_params_str = ', '.join(norm_params)
+            out = f"{prefix}{norm_params_str}{suffix}"
+            # Collapse whitespace and apply final normalizations
+            out = re.sub(r"\s+", " ", out)
+            out = re.sub(r"\s*::\s*", "::", out)
+            out = re.sub(r",\s*", ", ", out)
+            out = re.sub(r"\s+([&*])", r"\1", out)
+            out = out.replace(">>", "> >")
+            return out.strip() + line_part
+        except Exception:
+            return full_sig
+
     def load_coverage_mapping(self, coverage_json_path: str):
         with open(coverage_json_path, 'r') as f:
             self.coverage_map = json.load(f)
@@ -821,7 +777,7 @@ class CommitCoverageAnalyzer:
                 'direct_matches': 0,
                 'path_removed_matches': 0
             }
-        matcher = CoverageMatcher(self.coverage_map, self.alt_signature_map)
+        matcher = CoverageMatcher(self.coverage_map)
         return matcher.match(functions)
 
 
