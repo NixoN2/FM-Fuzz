@@ -208,7 +208,8 @@ class CoverageMatcher:
             full = f"{path}:{sig}"
             cov_full_to_tests.setdefault(full, set()).update(tests)
             cov_sig_to_tests.setdefault(sig, set()).update(tests)
-            cov_sig_to_fulls.setdefault(sig, []).append(full)
+            # Store original mapping key (with :line) for debug visibility
+            cov_sig_to_fulls.setdefault(sig, []).append(k)
         cov_sigs_list = list(cov_sig_to_tests.keys())
 
         all_covering_tests = set()
