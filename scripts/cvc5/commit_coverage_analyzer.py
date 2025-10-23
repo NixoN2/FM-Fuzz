@@ -649,13 +649,6 @@ class CommitCoverageAnalyzer:
                                 end=n.extent.end.line,
                                 file=node_file
                             ))
-                            # Debug-only: also print demangled signature via c++filt if available
-                            try:
-                                dm = self._demangle_with_cxxfilt(getattr(n, 'mangled_name', None))
-                                if dm:
-                                    print(f"    Selected DEMANGLED (debug-only): {file_path}:{dm}:{n.location.line}")
-                            except Exception:
-                                pass
                 for c in n.get_children():
                     visit(c)
 
