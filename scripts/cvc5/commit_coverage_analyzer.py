@@ -243,7 +243,7 @@ class CoverageMatcher:
                         default=(None, 0.0)
                     )
                     best_sig, best_ratio = best
-                    if best_sig is not None and best_ratio >= 0.95:
+                    if best_sig is not None and best_ratio >= 0.9:
                         tests = cov_sig_to_tests.get(best_sig, set())
                         matching_tests.update(tests)
                         path_removed_matches += 1
@@ -802,7 +802,7 @@ class CommitCoverageAnalyzer:
             '-x', 'c++',
             # C++ standard
             '-std=c++17',
-            
+            '-gz=none',  # Disable debug section compression
             # Include paths (critical for CVC5)
             '-I./include',                    # Public headers
             '-I./build/include',              # Generated headers
