@@ -71,7 +71,7 @@ jobs:
 
       - name: Run commit coverage analysis
         working-directory: cvc5
-        run: ${{ github.workspace }}/scripts/cvc5/run_commit_coverage_analysis.sh 15 ${{ github.workspace }}/scripts/cvc5/commit_coverage_analyzer.py ../coverage_mapping_merged.json build
+        run: ${{ github.workspace }}/scripts/cvc5/run_commit_coverage_analysis.sh 50 ${{ github.workspace }}/scripts/cvc5/commit_coverage_analyzer.py ../coverage_mapping_merged.json build
       
       # - name: Build signature dumper (LibTooling)
       #   working-directory: cvc5
