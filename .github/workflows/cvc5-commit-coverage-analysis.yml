@@ -36,6 +36,7 @@ jobs:
             libc6-dev \
             gcc \
             g++ \
+            binutils \
             libstdc++-14-dev \
             libc++-dev \
             libc++abi-dev \

@@ -201,11 +201,14 @@ class CoverageMatcher:
     def match(self, functions: List[str]) -> Dict:
         cov_full_to_tests: Dict[str, Set[str]] = {}
         cov_sig_to_tests: Dict[str, Set[str]] = {}
+        # Map normalized signature (without :line) to example full keys for debug
+        cov_sig_to_fulls: Dict[str, List[str]] = {}
         for k, tests in self.coverage_map.items():
             path, sig = self._split_path_and_sig(k)
             full = f"{path}:{sig}"
             cov_full_to_tests.setdefault(full, set()).update(tests)
             cov_sig_to_tests.setdefault(sig, set()).update(tests)
+            cov_sig_to_fulls.setdefault(sig, []).append(full)
         cov_sigs_list = list(cov_sig_to_tests.keys())
 
         all_covering_tests = set()
@@ -235,6 +238,13 @@ class CoverageMatcher:
                 matching_tests.update(tests)
                 path_removed_matches += 1
                 match_type = "path_removed"
+                # Debug: show example mapping keys for this signature
+                try:
+                    examples = cov_sig_to_fulls.get(our_sig_norm, [])
+                    if examples:
+                        print(f"DEBUG_PATHLESS our={our_sig_norm} examples={examples}")
+                except Exception:
+                    pass
             else:
                 try:
                     best = max(
@@ -248,6 +258,13 @@ class CoverageMatcher:
                         matching_tests.update(tests)
                         path_removed_matches += 1
                         match_type = f"fuzzy:{best_ratio:.2f}"
+                        # Debug: show example mapping keys for this fuzzy-matched signature
+                        try:
+                            examples = cov_sig_to_fulls.get(best_sig, [])
+                            if examples:
+                                print(f"DEBUG_FUZZY_MAP our={our_sig_norm} matched_sig={best_sig} examples={examples}")
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 
@@ -354,6 +371,18 @@ class CommitCoverageAnalyzer:
                 pass
         # Fallback
         return self._build_clang_args()
+
+    def _demangle_with_cxxfilt(self, mangled: Optional[str]) -> Optional[str]:
+        """Demangle a mangled C++ symbol using c++filt (binutils)."""
+        if not mangled:
+            return None
+        try:
+            res = subprocess.run(['c++filt'], input=str(mangled), capture_output=True, text=True)
+            if res.returncode == 0 and res.stdout:
+                return res.stdout.strip()
+        except Exception:
+            pass
+        return None
     def get_function_signature(self, cursor) -> Optional[str]:
         """Extract gcov-style function signature from a clang cursor"""
         try:
@@ -612,6 +641,13 @@ class CommitCoverageAnalyzer:
                                 end=n.extent.end.line,
                                 file=node_file
                             ))
+                            # Debug-only: also print demangled signature via c++filt if available
+                            try:
+                                dm = self._demangle_with_cxxfilt(getattr(n, 'mangled_name', None))
+                                if dm:
+                                    print(f"    Selected DEMANGLED (debug-only): {file_path}:{dm}:{n.location.line}")
+                            except Exception:
+                                pass
                 for c in n.get_children():
                     visit(c)
 
