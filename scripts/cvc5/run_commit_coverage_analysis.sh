@@ -44,6 +44,8 @@ fi
 # Get commits that changed files in src/ folder
 echo "Getting commits that changed files in src/ folder..."
 COMMITS=()
+# Scan window: 5x requested commits to ensure enough src/ changes
+SCAN_LIMIT=$((COMMITS_TO_ANALYZE * 5))
 while IFS= read -r commit; do
     if git show --name-only "$commit" 2>/dev/null | grep -q "^src/"; then
         COMMITS+=("$commit")
@@ -51,7 +53,7 @@ while IFS= read -r commit; do
             break
         fi
     fi
-done < <(git log --oneline -50 --format="%H")
+done < <(git log --format="%H" -n $SCAN_LIMIT)
 
 if [ ${#COMMITS[@]} -eq 0 ]; then
     echo "No commits found that changed src/ files"
