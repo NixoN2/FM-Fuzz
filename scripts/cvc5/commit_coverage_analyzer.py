@@ -386,13 +386,21 @@ class CommitCoverageAnalyzer:
     def get_function_signature(self, cursor) -> Optional[str]:
         """Extract gcov-style function signature from a clang cursor"""
         try:
+            # Prefer demangled signature from mangled name (matches coverage mapping formatting)
+            line = cursor.location.line
+            mangled = getattr(cursor, 'mangled_name', None)
+            demangled = self._demangle_with_cxxfilt(mangled)
+            if demangled:
+                # Use demangled signature as-is with line suffix
+                return f"{demangled}:{line}"
+
+            # Fallback to AST-rendered signature
             name = cursor.spelling
             if not name:
                 return None
 
             qualified_name = self.get_qualified_name(cursor)
             params = []
-            
             # Get parameters with template-aware rendering (best effort)
             for child in cursor.get_children():
                 if child.kind == clang.cindex.CursorKind.PARM_DECL:
