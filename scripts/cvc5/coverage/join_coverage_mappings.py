@@ -37,16 +37,16 @@ def main():
         merged_mapping[func] = sorted(list(set(merged_mapping[func])))
     
     # Save merged mapping
-    with open('coverage_mapping_merged.json', 'w') as f:
+    with open('coverage_mapping.json', 'w') as f:
         json.dump(merged_mapping, f, separators=(',', ':'))
     
     # Get file size
-    original_size = os.path.getsize('coverage_mapping_merged.json')
+    original_size = os.path.getsize('coverage_mapping.json')
     print(f"Original size: {original_size:,} bytes")
     
     # Compress
-    os.system("gzip -k coverage_mapping_merged.json")
-    compressed_size = os.path.getsize('coverage_mapping_merged.json.gz')
+    os.system("gzip -k coverage_mapping.json")
+    compressed_size = os.path.getsize('coverage_mapping.json.gz')
     compression_ratio = (compressed_size / original_size) * 100
     print(f"Compressed size: {compressed_size:,} bytes ({compression_ratio:.1f}% of original)")
     

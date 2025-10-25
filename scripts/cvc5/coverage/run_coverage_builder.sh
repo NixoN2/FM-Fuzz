@@ -15,7 +15,7 @@ export TEST_TIMEOUT=10800
 cd cvc5/build
 
 # Run coverage analysis
-python3 ../../scripts/cvc5/coverage_mapper.py \
+python3 ../../scripts/cvc5/coverage/coverage_mapper.py \
     --build-dir . \
     --start-index ${START_INDEX} \
     --end-index ${END_INDEX}
