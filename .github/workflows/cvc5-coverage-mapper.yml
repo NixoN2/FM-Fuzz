@@ -1,4 +1,4 @@
-name: Coverage Map Builder
+name: CVC5 Coverage Mapper
 
 on:
   workflow_dispatch:
