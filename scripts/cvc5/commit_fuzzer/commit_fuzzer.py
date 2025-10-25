@@ -141,7 +141,7 @@ class GitHelper:
         except Exception:
             return None
 
-class CoverageMatcher:
+class Matcher:
     def __init__(self, coverage_map: Dict[str, Set[str]]):
         self.coverage_map = coverage_map
 
@@ -159,44 +159,6 @@ class CoverageMatcher:
             return path, sig
         return '', no_line
 
-    def _split_signature_parts(self, sig: str):
-        s = self._strip_line_suffix(sig)
-        s = re.sub(r"\[abi:[^\]]+\]", "", s)
-        open_idx = -1
-        angle = 0
-        for i, ch in enumerate(s):
-            if ch == '<':
-                angle += 1
-            elif ch == '>':
-                angle = max(0, angle - 1)
-            elif ch == '(' and angle == 0:
-                open_idx = i
-                break
-        if open_idx == -1:
-            return s, '', ''
-        paren = 0
-        close_idx = -1
-        for j in range(open_idx, len(s)):
-            c = s[j]
-            if c == '<':
-                angle += 1
-            elif c == '>':
-                angle = max(0, angle - 1)
-            elif c == '(':
-                paren += 1
-            elif c == ')':
-                paren -= 1
-                if paren == 0 and angle == 0:
-                    close_idx = j
-                    break
-        if close_idx == -1:
-            return s, '', ''
-        prefix = s[:open_idx+1]
-        params_str = s[open_idx+1:close_idx]
-        suffix = s[close_idx:]
-        return prefix, params_str, suffix
-
-    # Removed matcher-side normalization; signatures should already be formatted like mapping
 
     def match(self, functions: List[str]) -> Dict:
         cov_full_to_tests: Dict[str, Set[str]] = {}
@@ -255,11 +217,8 @@ class CoverageMatcher:
                     )
                     best_sig, best_ratio = best
                     if best_sig is not None and best_ratio >= 0.9:
-                        tests = cov_sig_to_tests.get(best_sig, set())
-                        matching_tests.update(tests)
-                        path_removed_matches += 1
-                        match_type = f"fuzzy:{best_ratio:.2f}"
-                        # Debug: show example mapping keys for this fuzzy-matched signature
+                        # Do NOT count fuzzy matches as coverage; only report candidates
+                        match_type = f"fuzzy_candidate:{best_ratio:.2f}"
                         try:
                             examples = cov_sig_to_fulls.get(best_sig, [])
                             if examples:
@@ -298,7 +257,7 @@ class CoverageMatcher:
             'match_type_counts': match_type_counts
         }
 
-class CommitCoverageAnalyzer:
+class CommitAnalyzer:
     def __init__(self, repo_path: str = ".", compile_commands: Optional[str] = None):
         """Initialize with repository path."""
         self.repo_path = Path(repo_path)
@@ -564,7 +523,8 @@ class CommitCoverageAnalyzer:
         changed_functions: List[str] = []
 
         for file_path, changed_lines in changed_files_lines.items():
-            if not file_path.endswith(('.cpp', '.cc', '.c', '.h', '.hpp')):
+            # Only consider project sources under src/
+            if not (file_path.startswith('src/') and file_path.endswith(('.cpp', '.cc', '.c', '.h', '.hpp'))):
                 continue
 
             after_src = self.git.get_file_text_at_commit(commit_hash, file_path)
@@ -587,16 +547,16 @@ class CommitCoverageAnalyzer:
                 snippet = "\n".join(lines[s-1:e])
                 return self.normalize_code(snippet)
 
-            # Per changed line: select the innermost enclosing function (smallest span)
+            # Per changed line: select the innermost enclosing function (smallest extent)
             selected: Dict[str, FunctionInfo] = {}
             if after_funcs:
-                spans = [(f, (int(f.end) - int(f.start))) for f in after_funcs if self.is_cvc5_function(f.signature)]
+                cvc5_funcs = [f for f in after_funcs if self.is_cvc5_function(f.signature)]
                 for ln in sorted(changed_lines):
-                    candidates = [f for f, span in spans if int(f.start) <= ln <= int(f.end)]
+                    candidates = [f for f in cvc5_funcs if int(f.start) <= ln <= int(f.end)]
                     if not candidates:
                         continue
-                    # choose innermost by minimal span
-                    chosen = min(candidates, key=lambda x: (int(x.end) - int(x.start), int(x.start)))
+                    # choose innermost by minimal extent length, then earliest start
+                    chosen = min(candidates, key=lambda f: (int(f.end) - int(f.start), int(f.start)))
                     key = self.build_signature_key(chosen.signature)
                     selected[key] = chosen
 
@@ -815,7 +775,7 @@ class CommitCoverageAnalyzer:
                 'direct_matches': 0,
                 'path_removed_matches': 0
             }
-        matcher = CoverageMatcher(self.coverage_map)
+        matcher = Matcher(self.coverage_map)
         return matcher.match(functions)
 
 
@@ -960,7 +920,7 @@ class CommitCoverageAnalyzer:
 def main():
     parser = argparse.ArgumentParser(description='Analyze commit coverage using coverage mapping')
     parser.add_argument('commit', help='Commit hash to analyze')
-    parser.add_argument('--coverage-json', default='coverage_mapping_merged.json', 
+    parser.add_argument('--coverage-json', default='coverage_mapping.json', 
                        help='Path to coverage mapping JSON file')
     parser.add_argument('--compile-commands', default=None,
                        help='Path to compile_commands.json or its directory (for Clang args)')
@@ -973,7 +933,7 @@ def main():
         sys.exit(1)
     
     # Initialize analyzer
-    analyzer = CommitCoverageAnalyzer(".", compile_commands=args.compile_commands)
+    analyzer = CommitAnalyzer(".", compile_commands=args.compile_commands)
     
     # Analyze commit coverage (output to console only)
     analyzer.analyze_commit_coverage(args.commit, args.coverage_json)

@@ -1,4 +1,4 @@
-name: CVC5 Coverage Analysis
+name: Coverage Map Builder
 
 on:
   workflow_dispatch:
@@ -18,7 +18,7 @@ jobs:
       
       - name: Run regress0a coverage analysis (tests 1-602)
         run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/run_coverage_analysis.sh 1 602
+          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 1 602
       
       - name: Upload regress0a coverage mapping
         uses: actions/upload-artifact@v4
@@ -40,7 +40,7 @@ jobs:
       
       - name: Run regress0b coverage analysis (tests 603-1204)
         run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/run_coverage_analysis.sh 603 1204
+          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 603 1204
       
       - name: Upload regress0b coverage mapping
         uses: actions/upload-artifact@v4
@@ -62,7 +62,7 @@ jobs:
       
       - name: Run regress0c coverage analysis (tests 1205-1806)
         run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/run_coverage_analysis.sh 1205 1806
+          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 1205 1806
       
       - name: Upload regress0c coverage mapping
         uses: actions/upload-artifact@v4
@@ -84,7 +84,7 @@ jobs:
       
       - name: Run regress0d coverage analysis (tests 1807-2408)
         run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/run_coverage_analysis.sh 1807 2408
+          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 1807 2408
       
       - name: Upload regress0d coverage mapping
         uses: actions/upload-artifact@v4
@@ -107,7 +107,7 @@ jobs:
       
       - name: Run regress1a coverage analysis (tests 2409-2888)
         run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/run_coverage_analysis.sh 2409 2888
+          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 2409 2888
       
       - name: Upload regress1a coverage mapping
         uses: actions/upload-artifact@v4
@@ -129,7 +129,7 @@ jobs:
       
       - name: Run regress1b coverage analysis (tests 2889-3368)
         run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/run_coverage_analysis.sh 2889 3368
+          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 2889 3368
       
       - name: Upload regress1b coverage mapping
         uses: actions/upload-artifact@v4
@@ -151,7 +151,7 @@ jobs:
       
       - name: Run regress1c coverage analysis (tests 3369-3850)
         run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/run_coverage_analysis.sh 3369 3850
+          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 3369 3850
       
       - name: Upload regress1c coverage mapping
         uses: actions/upload-artifact@v4
@@ -173,7 +173,7 @@ jobs:
       
       - name: Run regress2 coverage analysis (tests 3851-3993)
         run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/run_coverage_analysis.sh 3851 3993
+          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 3851 3993
       
       - name: Upload regress2 coverage mapping
         uses: actions/upload-artifact@v4
@@ -195,7 +195,7 @@ jobs:
       
       - name: Run regress3 coverage analysis (tests 3994-4044)
         run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/run_coverage_analysis.sh 3994 4044
+          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 3994 4044
       
       - name: Upload regress3 coverage mapping
         uses: actions/upload-artifact@v4
@@ -217,7 +217,7 @@ jobs:
       
       - name: Run regress4 coverage analysis (tests 4045-4054)
         run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/run_coverage_analysis.sh 4045 4054
+          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 4045 4054
       
       - name: Upload regress4 coverage mapping
         uses: actions/upload-artifact@v4
@@ -242,11 +242,11 @@ jobs:
       
       - name: Join coverage mappings
         run: |
-          python3 scripts/cvc5/join_coverage_mappings.py
+          python3 scripts/cvc5/coverage/join_coverage_mappings.py
       
       - name: Upload final coverage mapping
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-mapping-final
-          path: coverage_mapping_merged.json.gz
+          name: coverage-mapping
+          path: coverage_mapping.json.gz
           retention-days: 45

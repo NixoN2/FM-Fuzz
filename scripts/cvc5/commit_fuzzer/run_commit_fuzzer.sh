@@ -7,10 +7,9 @@ set -e
 
 # Default values
 COMMITS_TO_ANALYZE=${1:-3}
-PYTHON_SCRIPT=${2:-"$(dirname "$0")/commit_coverage_analyzer.py"}
-COVERAGE_FILE=${3:-"coverage_mapping_merged.json"}
+PYTHON_SCRIPT=${2:-"$(dirname "$0")/commit_fuzzer/commit_fuzzer.py"}
+COVERAGE_FILE=${3:-"coverage_mapping.json"}
 COMPILE_COMMANDS=${4:-""}
-ARTIFACT_NAME="coverage-mapping-final"
 
 echo "=========================================="
 echo "CVC5 Commit Coverage Analysis"

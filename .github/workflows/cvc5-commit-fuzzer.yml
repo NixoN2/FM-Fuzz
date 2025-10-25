@@ -1,10 +1,10 @@
-name: CVC5 Commit Coverage Analysis
+name: CVC5 Commit Fuzzer
 
 on:
   workflow_dispatch:
 
 jobs:
-  commit-coverage-analysis:
+  commit-fuzzer:
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -49,45 +49,27 @@ jobs:
         run: |
           pip install gitpython unidiff "libclang==17.0.6"
 
-      - name: Build CVC5 with coverage
+      - name: Build cvc5 with coverage
         run: |
           # Set environment variables to ensure clang uses GCC 14 toolchain
           export CXX="clang++ --gcc-toolchain=/usr"
           export CC="clang --gcc-toolchain=/usr"
           ./scripts/cvc5/build.sh --coverage
       
-      - name: Download coverage mapping artifact from latest successful run
+      - name: Download coverage map
         uses: dawidd6/action-download-artifact@v3
         with:
-          name: coverage-mapping-final
+          name: coverage-mapping
           path: .
           github_token: ${{ secrets.GITHUB_TOKEN }}
           workflow: cvc5-coverage-analysis.yml
       
-      - name: Extract coverage mapping
+      - name: Extract coverage map
         run: |
-          gunzip coverage_mapping_merged.json.gz
-          ls -la coverage_mapping_merged.json
+          gunzip coverage_mapping.json.gz
+          ls -la coverage_mapping.json
 
-      - name: Run commit coverage analysis
+      - name: Run Commit Fuzzer
         working-directory: cvc5
-        run: ${{ github.workspace }}/scripts/cvc5/run_commit_coverage_analysis.sh 50 ${{ github.workspace }}/scripts/cvc5/commit_coverage_analyzer.py ../coverage_mapping_merged.json build
-      
-      # - name: Build signature dumper (LibTooling)
-      #   working-directory: cvc5
-      #   run: |
-      #     # Copy the tool source into this repo workspace to build against compile_commands.json
-      #     cp ${{ github.workspace }}/scripts/cvc5/sig_dump.cpp ./sig_dump.cpp
-      #     # Build using installed LLVM/Clang with GCC 14 toolchain and proper include paths
-      #     clang++ -std=c++17 --gcc-toolchain=/usr $(llvm-config --cxxflags) sig_dump.cpp -o sig_dump -L"$LLVM_PATH/lib" -Wl,-rpath,"$LLVM_PATH/lib" $(llvm-config --ldflags --system-libs --libs) -lclang-cpp
-
-      # - name: Run signature dumper on changed files (HEAD)
-      #   working-directory: cvc5
-      #   run: |
-      #     # Collect changed C/C++ files for HEAD commit in src/
-      #     CHANGED=$(git show --name-only --pretty=format: HEAD | grep '^src/.*\.[ch]p\{0,2\}$' || true)
-      #     if [ -n "$CHANGED" ]; then
-      #       ./sig_dump -p build $CHANGED | head -200
-      #     else
-      #       echo "No changed C/C++ files in HEAD to dump signatures for."
-      #     fi
+        run: ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/run_commit_fuzzer.sh 50 ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/commit_fuzzer.py ../coverage_mapping.json build
+     
