@@ -62,7 +62,7 @@ jobs:
           name: coverage-mapping
           path: .
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          workflow: cvc5-coverage-analysis.yml
+          workflow: cvc5-coverage-mapper.yml
       
       - name: Extract coverage map
         run: |
