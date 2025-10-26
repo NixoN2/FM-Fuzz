@@ -10,11 +10,17 @@ COMMITS_TO_ANALYZE=${1:-3}
 PYTHON_SCRIPT=${2:-"$(dirname "$0")/commit_fuzzer/commit_fuzzer.py"}
 COVERAGE_FILE=${3:-"coverage_mapping.json"}
 COMPILE_COMMANDS=${4:-""}
+# Coverage enforcement controls
+# If SKIP_COVERAGE_ENFORCEMENT is false (default), require minimum coverage
+# Set to true to skip enforcement
+SKIP_COVERAGE_ENFORCEMENT=${SKIP_COVERAGE_ENFORCEMENT:-false}
+MIN_OVERALL_COVERAGE=${MIN_OVERALL_COVERAGE:-80}
 
 echo "=========================================="
 echo "CVC5 Commit Coverage Analysis"
 echo "=========================================="
 echo "Analyzing last $COMMITS_TO_ANALYZE commits"
+echo "Skip coverage enforcement: $SKIP_COVERAGE_ENFORCEMENT (threshold=${MIN_OVERALL_COVERAGE}%)"
 echo ""
 
 # Check if we're in a git repository
@@ -122,3 +128,13 @@ else
   COV_PCT=0.0
 fi
 echo "OVERALL SUMMARY: commits=${COMMITS_PROCESSED}; total_functions=${TOTAL_FUNCS}; with_coverage=${TOTAL_WITH}; without_coverage=${TOTAL_WITHOUT}; overall_coverage=${COV_PCT}%"
+
+# Optionally enforce minimum coverage (default: enforce)
+if [ "$SKIP_COVERAGE_ENFORCEMENT" != "true" ]; then
+  # Convert to integer comparison by rounding down
+  COV_INT=${COV_PCT%.*}
+  if [ "$COV_INT" -lt "$MIN_OVERALL_COVERAGE" ]; then
+    echo "Minimum overall coverage (${MIN_OVERALL_COVERAGE}%) not met: ${COV_PCT}%"
+    exit 2
+  fi
+fi

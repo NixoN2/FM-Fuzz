@@ -1,10 +1,12 @@
-name: CVC5 Commit Fuzzer
+name: CVC5 Commit Analyzer Test
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 1'
 
 jobs:
-  commit-fuzzer:
+  commit-analyzer:
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -72,6 +74,7 @@ jobs:
       - name: Run Commit Fuzzer
         working-directory: cvc5
         env:
-          SKIP_COVERAGE_ENFORCEMENT: "true"
+          SKIP_COVERAGE_ENFORCEMENT: "false"
+          MIN_OVERALL_COVERAGE: "80"
         run: ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/run_commit_fuzzer.sh 50 ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/commit_fuzzer.py ../coverage_mapping.json build
      
