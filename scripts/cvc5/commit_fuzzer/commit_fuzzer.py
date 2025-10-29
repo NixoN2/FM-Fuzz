@@ -924,6 +924,7 @@ def main():
                        help='Path to coverage mapping JSON file')
     parser.add_argument('--compile-commands', default=None,
                        help='Path to compile_commands.json or its directory (for Clang args)')
+    parser.add_argument('--output-matrix', help='Output matrix to JSON file instead of console')
     
     args = parser.parse_args()
     
@@ -935,8 +936,38 @@ def main():
     # Initialize analyzer
     analyzer = CommitAnalyzer(".", compile_commands=args.compile_commands)
     
-    # Analyze commit coverage (output to console only)
-    analyzer.analyze_commit_coverage(args.commit, args.coverage_json)
+    # Analyze commit coverage
+    result = analyzer.analyze_commit_coverage(args.commit, args.coverage_json)
+    
+    # Get unique tests
+    unique_tests = sorted(list(set(result['covering_tests'])))
+    
+    # Always output summary (only once)
+    print(f"Changed functions: {result['summary']['total_functions']}; "
+          f"with coverage: {result['summary']['functions_with_tests']}; "
+          f"without: {result['summary']['functions_without_tests']}; "
+          f"unique tests: {result['summary']['total_covering_tests']}; "
+          f"coverage: {result['summary']['coverage_percentage']:.1f}%")
+    
+    if args.output_matrix:
+        # Output matrix to JSON file
+        jobs = []
+        for i, test in enumerate(unique_tests):
+            jobs.append({
+                'job_id': i,
+                'test': test
+            })
+        
+        matrix_data = {
+            'matrix': {'include': jobs},
+            'total_tests': len(unique_tests),
+            'total_jobs': len(jobs)
+        }
+        
+        with open(args.output_matrix, 'w') as f:
+            json.dump(matrix_data, f, indent=2)
+        
+        print(f"Matrix written to {args.output_matrix} with {len(unique_tests)} tests")
     
     return 0
 
