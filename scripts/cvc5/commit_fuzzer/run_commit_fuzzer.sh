@@ -10,6 +10,7 @@ COMMITS_TO_ANALYZE=${1:-3}
 PYTHON_SCRIPT=${2:-"$(dirname "$0")/commit_fuzzer/commit_fuzzer.py"}
 COVERAGE_FILE=${3:-"coverage_mapping.json"}
 COMPILE_COMMANDS=${4:-""}
+OUTPUT_MATRIX=${5:-""}
 # Coverage enforcement controls
 # If SKIP_COVERAGE_ENFORCEMENT is false (default), require minimum coverage
 # Set to true to skip enforcement
@@ -101,8 +102,12 @@ for commit in "${COMMITS[@]}"; do
     
     # Run the coverage analysis (capture output for aggregation)
     TMP_OUT=$(mktemp)
-    if [ -n "$COMPILE_COMMANDS" ]; then
+    if [ -n "$COMPILE_COMMANDS" ] && [ -n "$OUTPUT_MATRIX" ]; then
+        python3 "$PYTHON_SCRIPT" $commit --coverage-json "$COVERAGE_FILE" --compile-commands "$COMPILE_COMMANDS" --output-matrix "$OUTPUT_MATRIX" | tee "$TMP_OUT"
+    elif [ -n "$COMPILE_COMMANDS" ]; then
         python3 "$PYTHON_SCRIPT" $commit --coverage-json "$COVERAGE_FILE" --compile-commands "$COMPILE_COMMANDS" | tee "$TMP_OUT"
+    elif [ -n "$OUTPUT_MATRIX" ]; then
+        python3 "$PYTHON_SCRIPT" $commit --coverage-json "$COVERAGE_FILE" --output-matrix "$OUTPUT_MATRIX" | tee "$TMP_OUT"
     else
         python3 "$PYTHON_SCRIPT" $commit --coverage-json "$COVERAGE_FILE" | tee "$TMP_OUT"
     fi
