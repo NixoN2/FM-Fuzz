@@ -88,6 +88,10 @@ jobs:
           TOTAL_TESTS=$(jq -r '.total_tests' fuzzer_matrix.json)
           TOTAL_JOBS=$(jq -r '.total_jobs' fuzzer_matrix.json)
           
+          echo "DEBUG: MATRIX=$MATRIX"
+          echo "DEBUG: TOTAL_TESTS=$TOTAL_TESTS"
+          echo "DEBUG: TOTAL_JOBS=$TOTAL_JOBS"
+          
           echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
           echo "total_tests=$TOTAL_TESTS" >> $GITHUB_OUTPUT
           echo "total_jobs=$TOTAL_JOBS" >> $GITHUB_OUTPUT
