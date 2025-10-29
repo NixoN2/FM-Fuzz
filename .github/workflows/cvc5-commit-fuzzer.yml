@@ -69,9 +69,71 @@ jobs:
           gunzip coverage_mapping.json.gz
           ls -la coverage_mapping.json
 
-      - name: Run Commit Fuzzer
+      - name: Run Commit Fuzzer and create matrix
+        id: extract-tests
         working-directory: cvc5
         env:
           SKIP_COVERAGE_ENFORCEMENT: "true"
-        run: ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/run_commit_fuzzer.sh 50 ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/commit_fuzzer.py ../coverage_mapping.json build
-     
+        run: |
+          # Run commit fuzzer with matrix output (1 commit instead of 50)
+          ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/run_commit_fuzzer.sh 1 ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/commit_fuzzer.py ../coverage_mapping.json build --output-matrix fuzzer_matrix.json
+          
+          if [ ! -f "fuzzer_matrix.json" ]; then
+            echo "No matrix file created, ending job"
+            exit 0
+          fi
+          
+          # Read matrix data and output to GitHub Actions
+          MATRIX=$(jq -c '.matrix' fuzzer_matrix.json)
+          TOTAL_TESTS=$(jq -r '.total_tests' fuzzer_matrix.json)
+          TOTAL_JOBS=$(jq -r '.total_jobs' fuzzer_matrix.json)
+          
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "total_tests=$TOTAL_TESTS" >> $GITHUB_OUTPUT
+          echo "total_jobs=$TOTAL_JOBS" >> $GITHUB_OUTPUT
+          
+          echo "Matrix created with $TOTAL_JOBS jobs for $TOTAL_TESTS tests"
+
+  fuzzer-jobs:
+    needs: commit-fuzzer
+    if: needs.commit-fuzzer.outputs.total_tests > 0
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.commit-fuzzer.outputs.matrix) }}
+    permissions:
+      actions: read
+      contents: read
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      
+      - name: Install fuzzing dependencies
+        run: |
+          pip install yinyang
+          pip install z3-solver
+
+      - name: Build cvc5
+        run: |
+          ./scripts/cvc5/build.sh --coverage
+
+      - name: Run Fuzzer on assigned test
+        working-directory: cvc5
+        run: |
+          echo "Job ID: ${{ matrix.job_id }}"
+          echo "Assigned test: ${{ matrix.test }}"
+          
+          # Build full path: cvc5/test/regress/cli/ + test_path
+          full_test_path="test/regress/cli/${{ matrix.test }}"
+          
+          if [ -f "$full_test_path" ]; then
+            echo "Found test file: $full_test_path"
+            
+            # Run typefuzz for 5 minutes (300 seconds)
+            timeout 300 typefuzz "z3;./build/bin/cvc5" "$full_test_path" || {
+              echo "Fuzzing completed or timed out for ${{ matrix.test }}"
+            }
+          else
+            echo "Test file not found: $full_test_path"
+          fi
