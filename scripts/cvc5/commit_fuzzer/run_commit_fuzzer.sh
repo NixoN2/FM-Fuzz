@@ -48,22 +48,29 @@ fi
 
 # Get commits that changed files in src/ folder
 echo "Getting commits that changed files in src/ folder..."
-COMMITS=()
-# Scan window: 5x requested commits to ensure enough src/ changes
-SCAN_LIMIT=$((COMMITS_TO_ANALYZE * 5))
-while IFS= read -r commit; do
-    if git show --name-only "$commit" 2>/dev/null | grep -q "^src/"; then
-        COMMITS+=("$commit")
-        if [ ${#COMMITS[@]} -ge $COMMITS_TO_ANALYZE ]; then
-            break
-        fi
-    fi
-done < <(git log --format="%H" -n $SCAN_LIMIT)
 
-if [ ${#COMMITS[@]} -eq 0 ]; then
-    echo "No commits found that changed src/ files"
-    exit 1
-fi
+# TESTING: Use fixed commit instead of dynamic discovery
+FIXED_COMMIT="18d0c5e070dfa4c8b643ea1a9b656cf3191bc2f2"
+echo "TESTING MODE: Using fixed commit $FIXED_COMMIT"
+COMMITS=("$FIXED_COMMIT")
+
+# COMMENTED OUT: Dynamic commit discovery
+# COMMITS=()
+# # Scan window: 5x requested commits to ensure enough src/ changes
+# SCAN_LIMIT=$((COMMITS_TO_ANALYZE * 5))
+# while IFS= read -r commit; do
+#     if git show --name-only "$commit" 2>/dev/null | grep -q "^src/"; then
+#         COMMITS+=("$commit")
+#         if [ ${#COMMITS[@]} -ge $COMMITS_TO_ANALYZE ]; then
+#             break
+#         fi
+#     fi
+# done < <(git log --format="%H" -n $SCAN_LIMIT)
+
+# if [ ${#COMMITS[@]} -eq 0 ]; then
+#     echo "No commits found that changed src/ files"
+#     exit 1
+# fi
 
 echo "Found commits that changed src/ files:"
 echo "${COMMITS[@]}" | tr ' ' '\n' | nl -w1 -s'. '
