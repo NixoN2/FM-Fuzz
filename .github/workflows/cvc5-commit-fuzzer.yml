@@ -93,8 +93,8 @@ jobs:
           echo "DEBUG: TOTAL_JOBS=$TOTAL_JOBS"
           
           echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-          echo "total_tests=$TOTAL_TESTS" >> $GITHUB_OUTPUT
-          echo "total_jobs=$TOTAL_JOBS" >> $GITHUB_OUTPUT
+          echo "total_tests=$((TOTAL_TESTS))" >> $GITHUB_OUTPUT
+          echo "total_jobs=$((TOTAL_JOBS))" >> $GITHUB_OUTPUT
           
           echo "Matrix created with $TOTAL_JOBS jobs for $TOTAL_TESTS tests"
 
