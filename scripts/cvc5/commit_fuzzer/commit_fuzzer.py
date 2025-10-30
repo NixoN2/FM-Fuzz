@@ -925,6 +925,10 @@ def main():
     parser.add_argument('--compile-commands', default=None,
                        help='Path to compile_commands.json or its directory (for Clang args)')
     parser.add_argument('--output-matrix', help='Output matrix to JSON file instead of console')
+    parser.add_argument('--tests-per-job', type=int, default=1, 
+                       help='Number of tests to group per job (default: 1)')
+    parser.add_argument('--max-jobs', type=int, default=None,
+                       help='Maximum number of jobs to create (default: unlimited)')
     
     args = parser.parse_args()
     
@@ -950,13 +954,35 @@ def main():
           f"coverage: {result['summary']['coverage_percentage']:.1f}%")
     
     if args.output_matrix:
-        # Output matrix to JSON file
+        # Group tests into jobs
+        tests_per_job = args.tests_per_job
+        max_jobs = args.max_jobs
+        
+        # Limit total tests if max_jobs is specified
+        if max_jobs is not None:
+            max_tests = max_jobs * tests_per_job
+            if len(unique_tests) > max_tests:
+                unique_tests = unique_tests[:max_tests]
+                print(f"Limited to {max_tests} tests due to max-jobs={max_jobs}")
+        
+        # Group tests into jobs
         jobs = []
-        for i, test in enumerate(unique_tests):
-            jobs.append({
-                'job_id': i,
-                'test': test
-            })
+        for i in range(0, len(unique_tests), tests_per_job):
+            job_tests = unique_tests[i:i + tests_per_job]
+            job_id = i // tests_per_job
+            
+            if tests_per_job == 1:
+                # Single test per job (original format)
+                jobs.append({
+                    'job_id': job_id,
+                    'test': job_tests[0]
+                })
+            else:
+                # Multiple tests per job (new format)
+                jobs.append({
+                    'job_id': job_id,
+                    'tests': job_tests
+                })
         
         matrix_data = {
             'matrix': {'include': jobs},
@@ -967,7 +993,7 @@ def main():
         with open(args.output_matrix, 'w') as f:
             json.dump(matrix_data, f, indent=2)
         
-        print(f"Matrix written to {args.output_matrix} with {len(unique_tests)} tests")
+        print(f"Matrix written to {args.output_matrix} with {len(unique_tests)} tests in {len(jobs)} jobs ({tests_per_job} tests per job)")
     
     return 0
 
