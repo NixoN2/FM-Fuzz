@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Commit Coverage Analyzer
+Prepare Commit Fuzzer
 Gets changed functions from a commit and finds tests that cover those functions.
+Prepares a matrix for fuzzing jobs.
 """
 
 import json
@@ -257,7 +258,7 @@ class Matcher:
             'match_type_counts': match_type_counts
         }
 
-class CommitAnalyzer:
+class PrepareCommitAnalyzer:
     def __init__(self, repo_path: str = ".", compile_commands: Optional[str] = None):
         """Initialize with repository path."""
         self.repo_path = Path(repo_path)
@@ -938,7 +939,7 @@ def main():
         sys.exit(1)
     
     # Initialize analyzer
-    analyzer = CommitAnalyzer(".", compile_commands=args.compile_commands)
+    analyzer = PrepareCommitAnalyzer(".", compile_commands=args.compile_commands)
     
     # Analyze commit coverage
     result = analyzer.analyze_commit_coverage(args.commit, args.coverage_json)

@@ -81,8 +81,8 @@ jobs:
         run: |
           # Run commit fuzzer with matrix output (1 commit instead of 50)
           # Create matrix with 4 tests per job, max 20 jobs (80 tests total)
-          ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/run_commit_fuzzer.sh \
-            --python-script ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/commit_fuzzer.py \
+          ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/run_prepare_commit_fuzzer.sh \
+            --python-script ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/prepare_commit_fuzzer.py \
             --coverage-file ../coverage_mapping.json \
             --compile-commands build \
             --output-matrix fuzzer_matrix.json \
@@ -104,19 +104,11 @@ jobs:
           TOTAL_TESTS=$(jq -r '.total_tests' fuzzer_matrix.json)
           TOTAL_JOBS=$(jq -r '.total_jobs' fuzzer_matrix.json)
           
-          echo "DEBUG: MATRIX=$MATRIX"
-          echo "DEBUG: TOTAL_TESTS=$TOTAL_TESTS"
-          echo "DEBUG: TOTAL_JOBS=$TOTAL_JOBS"
-          
           echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
           echo "total_tests=$TOTAL_TESTS" >> $GITHUB_OUTPUT
           echo "total_jobs=$TOTAL_JOBS" >> $GITHUB_OUTPUT
           
           echo "Matrix created with $TOTAL_JOBS jobs for $TOTAL_TESTS tests"
-          echo "Outputs set successfully"
-          
-          # Ensure job succeeds even if there are issues
-          echo "Commit fuzzer job completed successfully"
 
   fuzzer-jobs:
     needs: commit-fuzzer
@@ -130,12 +122,6 @@ jobs:
       contents: read
     
     steps:
-      - name: Debug matrix values
-        run: |
-          echo "DEBUG: total_tests from previous job: '${{ needs.commit-fuzzer.outputs.total_tests }}'"
-          echo "DEBUG: matrix from previous job: '${{ needs.commit-fuzzer.outputs.matrix }}'"
-          echo "DEBUG: total_jobs from previous job: '${{ needs.commit-fuzzer.outputs.total_jobs }}'"
-      
       - name: Checkout
         uses: actions/checkout@v5
       
@@ -148,86 +134,11 @@ jobs:
         run: |
           ./scripts/cvc5/build.sh --coverage
 
-      - name: Run Fuzzer on assigned tests (4 tests in parallel)
+      - name: Run Fuzzer on assigned tests
         working-directory: cvc5
         run: |
-          echo "Job ID: ${{ matrix.job_id }}"
-          echo "Assigned tests: ${{ matrix.tests }}"
-          
-          # Function to run typefuzz on a single test
-          run_fuzzer() {
-            local test_path="$1"
-            local test_name="$2"
-            local process_id="$3"
-            
-            # Create unique folders for this process
-            local bugs_folder="bugs_$process_id"
-            local scratch_folder="scratch_$process_id"
-            local log_folder="logs_$process_id"
-            local log_file="fuzzer_$process_id.log"
-            
-            # Clean up any existing folders
-            rm -rf "$bugs_folder" "$scratch_folder" "$log_folder"
-            
-            echo "[PROCESS $process_id] Starting fuzzing on $test_name"
-            echo "[PROCESS $process_id] Using folders: bugs=$bugs_folder, scratch=$scratch_folder, logs=$log_folder"
-            
-            if [ -f "$test_path" ]; then
-              echo "[PROCESS $process_id] Found test file: $test_path"
-              
-              # Run typefuzz with unique folders and separate log file
-              timeout -s 9 300 typefuzz \
-                --bugs "$bugs_folder" \
-                --scratch "$scratch_folder" \
-                --logfolder "$log_folder" \
-                "z3;./build/bin/cvc5" "$test_path" > "$log_file" 2>&1 || {
-                echo "[PROCESS $process_id] Fuzzing completed or timed out for $test_name"
-              }
-              
-              # Show full log output
-              if [ -f "$log_file" ]; then
-                echo "[PROCESS $process_id] Full output:"
-                cat "$log_file" | sed "s/^/[PROCESS $process_id] /"
-              fi
-              
-              # Clean up folders
-              rm -rf "$bugs_folder" "$scratch_folder" "$log_folder"
-            else
-              echo "[PROCESS $process_id] Test file not found: $test_path"
-            fi
-          }
-          
-          # Parse the tests array and run each test in parallel
-          # GitHub Actions passes arrays as JSON strings, so we need to parse them properly
-          tests_json='${{ toJson(matrix.tests) }}'
-          echo "Tests JSON: $tests_json"
-          
-          # Extract individual tests from the JSON array
-          test1=$(echo "$tests_json" | jq -r '.[0] // empty')
-          test2=$(echo "$tests_json" | jq -r '.[1] // empty')
-          test3=$(echo "$tests_json" | jq -r '.[2] // empty')
-          test4=$(echo "$tests_json" | jq -r '.[3] // empty')
-          
-          echo "Test 1: $test1"
-          echo "Test 2: $test2"
-          echo "Test 3: $test3"
-          echo "Test 4: $test4"
-          
-          # Run all 4 tests in parallel
-          if [ -n "$test1" ] && [ "$test1" != "null" ]; then
-            run_fuzzer "test/regress/cli/$test1" "$test1" "1" &
-          fi
-          if [ -n "$test2" ] && [ "$test2" != "null" ]; then
-            run_fuzzer "test/regress/cli/$test2" "$test2" "2" &
-          fi
-          if [ -n "$test3" ] && [ "$test3" != "null" ]; then
-            run_fuzzer "test/regress/cli/$test3" "$test3" "3" &
-          fi
-          if [ -n "$test4" ] && [ "$test4" != "null" ]; then
-            run_fuzzer "test/regress/cli/$test4" "$test4" "4" &
-          fi
-          
-          # Wait for all background processes to complete
-          echo "Waiting for all fuzzing processes to complete..."
-          wait
-          echo "All fuzzing processes completed for job ${{ matrix.job_id }}"
+          ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/run_commit_fuzzer.sh \
+            --tests-json '${{ toJson(matrix.tests) }}' \
+            --job-id '${{ matrix.job_id }}' \
+            --tests-root 'test/regress/cli' \
+            --timeout 300
