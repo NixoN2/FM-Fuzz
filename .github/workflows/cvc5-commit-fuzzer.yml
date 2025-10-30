@@ -163,13 +163,14 @@ jobs:
             # Create unique folders for this process
             local bugs_folder="bugs_$process_id"
             local scratch_folder="scratch_$process_id"
+            local log_folder="logs_$process_id"
             local log_file="fuzzer_$process_id.log"
             
             # Clean up any existing folders
-            rm -rf "$bugs_folder" "$scratch_folder"
+            rm -rf "$bugs_folder" "$scratch_folder" "$log_folder"
             
             echo "[PROCESS $process_id] Starting fuzzing on $test_name"
-            echo "[PROCESS $process_id] Using folders: bugs=$bugs_folder, scratch=$scratch_folder"
+            echo "[PROCESS $process_id] Using folders: bugs=$bugs_folder, scratch=$scratch_folder, logs=$log_folder"
             
             if [ -f "$test_path" ]; then
               echo "[PROCESS $process_id] Found test file: $test_path"
@@ -178,6 +179,7 @@ jobs:
               timeout -s 9 300 typefuzz \
                 --bugs "$bugs_folder" \
                 --scratch "$scratch_folder" \
+                --logfolder "$log_folder" \
                 "z3;./build/bin/cvc5" "$test_path" > "$log_file" 2>&1 || {
                 echo "[PROCESS $process_id] Fuzzing completed or timed out for $test_name"
               }
@@ -189,7 +191,7 @@ jobs:
               fi
               
               # Clean up folders
-              rm -rf "$bugs_folder" "$scratch_folder"
+              rm -rf "$bugs_folder" "$scratch_folder" "$log_folder"
             else
               echo "[PROCESS $process_id] Test file not found: $test_path"
             fi
