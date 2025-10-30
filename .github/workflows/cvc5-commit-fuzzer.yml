@@ -160,17 +160,38 @@ jobs:
             local test_name="$2"
             local process_id="$3"
             
-            echo "Process $process_id: Starting fuzzing on $test_name"
+            # Create unique folders for this process
+            local bugs_folder="bugs_$process_id"
+            local scratch_folder="scratch_$process_id"
+            local log_file="fuzzer_$process_id.log"
+            
+            # Clean up any existing folders
+            rm -rf "$bugs_folder" "$scratch_folder"
+            
+            echo "[PROCESS $process_id] Starting fuzzing on $test_name"
+            echo "[PROCESS $process_id] Using folders: bugs=$bugs_folder, scratch=$scratch_folder"
             
             if [ -f "$test_path" ]; then
-              echo "Process $process_id: Found test file: $test_path"
+              echo "[PROCESS $process_id] Found test file: $test_path"
               
-              # Run typefuzz for 5 minutes (300 seconds) with SIGKILL on timeout
-              timeout -s 9 300 typefuzz "z3;./build/bin/cvc5" "$test_path" || {
-                echo "Process $process_id: Fuzzing completed or timed out for $test_name"
+              # Run typefuzz with unique folders and separate log file
+              timeout -s 9 300 typefuzz \
+                --bugs "$bugs_folder" \
+                --scratch "$scratch_folder" \
+                "z3;./build/bin/cvc5" "$test_path" > "$log_file" 2>&1 || {
+                echo "[PROCESS $process_id] Fuzzing completed or timed out for $test_name"
               }
+              
+              # Show full log output
+              if [ -f "$log_file" ]; then
+                echo "[PROCESS $process_id] Full output:"
+                cat "$log_file" | sed "s/^/[PROCESS $process_id] /"
+              fi
+              
+              # Clean up folders
+              rm -rf "$bugs_folder" "$scratch_folder"
             else
-              echo "Process $process_id: Test file not found: $test_path"
+              echo "[PROCESS $process_id] Test file not found: $test_path"
             fi
           }
           
