@@ -6,6 +6,10 @@ on:
 jobs:
   commit-fuzzer:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.extract-tests.outputs.matrix }}
+      total_tests: ${{ steps.extract-tests.outputs.total_tests }}
+      total_jobs: ${{ steps.extract-tests.outputs.total_jobs }}
     permissions:
       actions: read
       contents: read
@@ -76,9 +80,21 @@ jobs:
           SKIP_COVERAGE_ENFORCEMENT: "true"
         run: |
           # Run commit fuzzer with matrix output (1 commit instead of 50)
-          ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/run_commit_fuzzer.sh 1 ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/commit_fuzzer.py ../coverage_mapping.json build --output-matrix fuzzer_matrix.json
+          # Create matrix with 4 tests per job, max 20 jobs (80 tests total)
+          ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/run_prepare_commit_fuzzer.sh \
+            --python-script ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/prepare_commit_fuzzer.py \
+            --coverage-file ../coverage_mapping.json \
+            --compile-commands build \
+            --output-matrix fuzzer_matrix.json \
+            --tests-per-job 4 \
+            --max-jobs 20 \
+            1
           
           if [ ! -f "fuzzer_matrix.json" ]; then
+            echo "No matrix file created, setting empty outputs"
+            echo "matrix={\"include\":[]}" >> $GITHUB_OUTPUT
+            echo "total_tests=0" >> $GITHUB_OUTPUT
+            echo "total_jobs=0" >> $GITHUB_OUTPUT
             echo "No matrix file created, ending job"
             exit 0
           fi
@@ -96,7 +112,7 @@ jobs:
 
   fuzzer-jobs:
     needs: commit-fuzzer
-    if: needs.commit-fuzzer.outputs.total_tests > 0
+    if: needs.commit-fuzzer.result == 'success' && needs.commit-fuzzer.outputs.total_tests != '' && needs.commit-fuzzer.outputs.total_tests != '0'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -118,22 +134,11 @@ jobs:
         run: |
           ./scripts/cvc5/build.sh --coverage
 
-      - name: Run Fuzzer on assigned test
+      - name: Run Fuzzer on assigned tests
         working-directory: cvc5
         run: |
-          echo "Job ID: ${{ matrix.job_id }}"
-          echo "Assigned test: ${{ matrix.test }}"
-          
-          # Build full path: cvc5/test/regress/cli/ + test_path
-          full_test_path="test/regress/cli/${{ matrix.test }}"
-          
-          if [ -f "$full_test_path" ]; then
-            echo "Found test file: $full_test_path"
-            
-            # Run typefuzz for 5 minutes (300 seconds)
-            timeout 300 typefuzz "z3;./build/bin/cvc5" "$full_test_path" || {
-              echo "Fuzzing completed or timed out for ${{ matrix.test }}"
-            }
-          else
-            echo "Test file not found: $full_test_path"
-          fi
+          ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/run_commit_fuzzer.sh \
+            --tests-json '${{ toJson(matrix.tests) }}' \
+            --job-id '${{ matrix.job_id }}' \
+            --tests-root 'test/regress/cli' \
+            --timeout 300
