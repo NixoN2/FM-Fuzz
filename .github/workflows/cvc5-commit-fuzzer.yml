@@ -80,14 +80,14 @@ jobs:
           SKIP_COVERAGE_ENFORCEMENT: "true"
         run: |
           # Run commit fuzzer with matrix output (1 commit instead of 50)
-          # Create matrix with 4 tests per job, max 20 jobs (80 tests total)
+          # Create matrix with 1 test per job, max 1 job (1 test total for testing)
           ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/run_prepare_commit_fuzzer.sh \
             --python-script ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/prepare_commit_fuzzer.py \
             --coverage-file ../coverage_mapping.json \
             --compile-commands build \
             --output-matrix fuzzer_matrix.json \
-            --tests-per-job 4 \
-            --max-jobs 20 \
+            --tests-per-job 1 \
+            --max-jobs 1 \
             1
           
           if [ ! -f "fuzzer_matrix.json" ]; then

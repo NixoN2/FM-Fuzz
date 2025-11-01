@@ -13,6 +13,9 @@ import tempfile
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 
+# Number of cores to use for fastcov coverage extraction
+FASTCOV_JOBS = 4
+
 class CommitFuzzer:
     def __init__(self, build_dir: str = "build", tests_root: str = "test/regress/cli"):
         self.build_dir = Path(build_dir)
@@ -129,7 +132,7 @@ class CommitFuzzer:
     
     def extract_coverage_data(self, output_file: Path, jobs: int = 1) -> Optional[Dict]:
         """Extract coverage data using fastcov and return JSON data"""
-        # Run fastcov to generate coverage JSON (using 1 job to not compete with fuzzing)
+        # Run fastcov to generate coverage JSON
         result = subprocess.run([
             "fastcov", "--gcov", "gcov", "--search-directory", str(self.build_dir),
             "--output", str(output_file),
@@ -302,7 +305,7 @@ class CommitFuzzer:
                 
                 # Record coverage after this iteration
                 fastcov_temp = temp_path / f"coverage_iter_{iteration}.json"
-                coverage_data = self.extract_coverage_data(fastcov_temp, jobs=1)
+                coverage_data = self.extract_coverage_data(fastcov_temp, jobs=FASTCOV_JOBS)
                 
                 elapsed_total = time.time() - start_time if timeout else 0
                 
