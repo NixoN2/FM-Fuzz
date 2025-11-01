@@ -972,18 +972,11 @@ def main():
             job_tests = unique_tests[i:i + tests_per_job]
             job_id = i // tests_per_job
             
-            if tests_per_job == 1:
-                # Single test per job (original format)
-                jobs.append({
-                    'job_id': job_id,
-                    'test': job_tests[0]
-                })
-            else:
-                # Multiple tests per job (new format)
-                jobs.append({
-                    'job_id': job_id,
-                    'tests': job_tests
-                })
+            # Always use 'tests' as an array, even for single test
+            jobs.append({
+                'job_id': job_id,
+                'tests': job_tests
+            })
         
         matrix_data = {
             'matrix': {'include': jobs},
