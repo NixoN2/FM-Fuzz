@@ -21,17 +21,15 @@ class CommitFuzzer:
         
     def reset_coverage_counters(self):
         """Reset coverage counters using fastcov --zerocounters for isolation"""
-        result = subprocess.run([
+        # Clear existing .gcda files before resetting (same as coverage_mapper.py)
+        for gcda in self.build_dir.rglob("*.gcda"):
+            gcda.unlink()
+        
+        # Reset coverage counters using fastcov (ignore errors, same as coverage_mapper.py)
+        subprocess.run([
             "fastcov", "--zerocounters", "--search-directory", str(self.build_dir),
             "--exclude", "/usr/include/*", "--exclude", "*/deps/*"
         ], cwd=self.build_dir.parent, capture_output=True, text=True, check=False)
-        
-        if result.returncode != 0:
-            print(f"Warning: Failed to reset coverage counters: {result.stderr}", file=sys.stderr)
-        
-        # Also remove any existing .gcda files
-        for gcda in self.build_dir.rglob("*.gcda"):
-            gcda.unlink()
     
     def run_typefuzz_single_iteration(self, input_file: Path, bugs_folder: Path, 
                                       scratch_folder: Path, log_folder: Path) -> bool:
@@ -59,16 +57,30 @@ class CommitFuzzer:
         ]
         
         try:
+            # Capture stderr to see what's wrong, but keep stdout quiet
             result = subprocess.run(
                 cmd,
                 cwd=self.build_dir.parent,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
                 check=False
             )
+            if result.returncode != 0:
+                print(f"✗ typefuzz failed (exit code {result.returncode})", end=" ", flush=True)
+                if result.stderr:
+                    # Show first line of error if available
+                    error_first_line = result.stderr.strip().split('\n')[0]
+                    if error_first_line:
+                        print(f"- {error_first_line[:100]}")
+                else:
+                    print("")
             return result.returncode == 0
+        except FileNotFoundError:
+            print(f"✗ typefuzz command not found", file=sys.stderr)
+            return False
         except Exception as e:
-            print(f"Error running typefuzz: {e}", file=sys.stderr)
+            print(f"✗ Error running typefuzz: {e}", file=sys.stderr)
             return False
     
     def find_latest_mutant(self, scratch_folder: Path) -> Optional[Path]:
