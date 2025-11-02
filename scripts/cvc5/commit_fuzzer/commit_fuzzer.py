@@ -52,9 +52,8 @@ class CommitFuzzer:
         cmd = [
             "typefuzz",
             "-i", "1",  # Single iteration
-            "-m", "1",  # Modulo 1: test every mutant (not default 2)
             "--keep-mutants",  # KEEP MUTANTS - critical for chaining iterations
-            "-q",  # Quiet mode
+            # "-q",  # Quiet mode
             "--bugs", str(bugs_folder),
             "--scratch", str(scratch_folder),
             "--logfolder", str(log_folder),
