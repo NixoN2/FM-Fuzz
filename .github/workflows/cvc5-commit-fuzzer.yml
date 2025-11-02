@@ -127,8 +127,11 @@ jobs:
       
       - name: Install fuzzing dependencies
         run: |
-          pip install yinyang
+          pip install antlr4-python3-runtime==4.9.2
           pip install z3-solver
+          git clone https://github.com/testsmt/yinyang.git
+          cd yinyang
+          pip install -e .
 
       - name: Check typefuzz version
         run: |
