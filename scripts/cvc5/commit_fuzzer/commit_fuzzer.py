@@ -74,9 +74,30 @@ class CommitFuzzer:
             
             # Print typefuzz output if there's any (even in quiet mode, errors might show)
             if result.stdout:
-                print(f"\n[typefuzz stdout]: {result.stdout[:200]}", file=sys.stderr)
+                print(f"\n[typefuzz stdout]: {result.stdout[:300]}", file=sys.stderr)
             if result.stderr:
-                print(f"\n[typefuzz stderr]: {result.stderr[:200]}", file=sys.stderr)
+                print(f"\n[typefuzz stderr]: {result.stderr[:300]}", file=sys.stderr)
+            
+            # Check log files for mutation statistics
+            if log_folder.exists():
+                log_files = sorted(log_folder.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+                if log_files:
+                    latest_log = log_files[0]
+                    try:
+                        with open(latest_log, 'r', encoding='utf-8', errors='ignore') as f:
+                            log_content = f.read()
+                            # Extract key lines about mutations
+                            for line in log_content.split('\n'):
+                                line_lower = line.lower()
+                                if "finished generations:" in line_lower or "generation" in line_lower:
+                                    print(f"  [DEBUG] Log: {line.strip()[:200]}", file=sys.stderr)
+                                if "unsuccessful" in line_lower or "successful" in line_lower:
+                                    if "generation" in line_lower or "mutation" in line_lower:
+                                        print(f"  [DEBUG] Log: {line.strip()[:200]}", file=sys.stderr)
+                                if "mutant" in line_lower and ("saved" in line_lower or "created" in line_lower or "failed" in line_lower):
+                                    print(f"  [DEBUG] Log: {line.strip()[:200]}", file=sys.stderr)
+                    except Exception as e:
+                        print(f"  [DEBUG] Could not read log file {latest_log}: {e}", file=sys.stderr)
             
             if result.returncode != 0:
                 print(f"✗ typefuzz failed (exit code {result.returncode})", end=" ", flush=True)
