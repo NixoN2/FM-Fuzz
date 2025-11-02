@@ -80,14 +80,14 @@ jobs:
           SKIP_COVERAGE_ENFORCEMENT: "true"
         run: |
           # Run commit fuzzer with matrix output (1 commit instead of 50)
-          # Create matrix with 1 test per job, max 4 jobs (4 tests total for testing)
+          # Create matrix with 4 tests per job, max 20 jobs (80 tests total)
           ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/run_prepare_commit_fuzzer.sh \
             --python-script ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/prepare_commit_fuzzer.py \
             --coverage-file ../coverage_mapping.json \
             --compile-commands build \
             --output-matrix fuzzer_matrix.json \
-            --tests-per-job 1 \
-            --max-jobs 4 \
+            --tests-per-job 4 \
+            --max-jobs 20 \
             1
           
           if [ ! -f "fuzzer_matrix.json" ]; then
@@ -125,6 +125,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
       
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 \
+            python3-pip \
+            unzip \
+            wget
+
       - name: Install fuzzing dependencies
         run: |
           pip install antlr4-python3-runtime==4.9.2
@@ -133,19 +142,42 @@ jobs:
           cd yinyang
           pip install -e .
 
-      - name: Check typefuzz version
+      - name: Download solver binaries
         run: |
-          typefuzz --version || typefuzz --help | head -20
+          mkdir -p ${{ github.workspace }}/solvers
+          
+          # Download cvc4-1.6
+          wget -q https://cvc4.cs.stanford.edu/downloads/builds/x86_64-linux-opt/cvc4-1.6-x86_64-linux-opt \
+            -O ${{ github.workspace }}/solvers/cvc4-1.6
+          chmod +x ${{ github.workspace }}/solvers/cvc4-1.6
+          
+          # Download z3-4.8.7
+          wget -q https://github.com/Z3Prover/z3/releases/download/z3-4.8.7/z3-4.8.7-x64-ubuntu-16.04.zip -O /tmp/z3.zip
+          unzip -q /tmp/z3.zip -d /tmp
+          cp /tmp/z3-4.8.7-x64-ubuntu-16.04/bin/z3 ${{ github.workspace }}/solvers/z3-4.8.7
+          cp /tmp/z3-4.8.7-x64-ubuntu-16.04/bin/libz3.so ${{ github.workspace }}/solvers/
+          chmod +x ${{ github.workspace }}/solvers/z3-4.8.7
+          rm -rf /tmp/z3.zip /tmp/z3-4.8.7-x64-ubuntu-16.04
 
       - name: Build cvc5
         run: |
-          ./scripts/cvc5/build.sh --coverage
+          ./scripts/cvc5/build.sh
 
-      - name: Run Fuzzer on assigned tests
+      - name: Verify solver binaries
+        run: |
+          ${{ github.workspace }}/solvers/cvc4-1.6 --version
+          ${{ github.workspace }}/solvers/z3-4.8.7 --version
+          z3 --version
+
+      - name: Run Simple Fuzzer on assigned tests
         working-directory: cvc5
         run: |
-          ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/run_commit_fuzzer.sh \
+          ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/run_simple_fuzzer.sh \
             --tests-json '${{ toJson(matrix.tests) }}' \
             --job-id '${{ matrix.job_id }}' \
             --tests-root 'test/regress/cli' \
-            --timeout 300
+            --timeout 21600 \
+            --iterations 2147483647 \
+            --z3-old-path ${{ github.workspace }}/solvers/z3-4.8.7 \
+            --cvc4-path ${{ github.workspace }}/solvers/cvc4-1.6 \
+            --cvc5-path ./build/bin/cvc5
