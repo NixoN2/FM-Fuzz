@@ -47,16 +47,17 @@ class CommitFuzzer:
         log_folder.mkdir(parents=True, exist_ok=True)
         
         # Build typefuzz command with 1 iteration
+        # Note: Flags must come before positional arguments (SOLVER_CLIS and PATH_TO_SEEDS)
         cmd = [
             "typefuzz",
-            "--bugs", str(bugs_folder),
-            "--scratch", str(scratch_folder),
-            "--logfolder", str(log_folder),
             "-i", "1",  # Single iteration
             "--keep-mutants",  # KEEP MUTANTS - critical for chaining iterations
             "-q",  # Quiet mode
-            "z3;./build/bin/cvc5",
-            str(input_file)
+            "--bugs", str(bugs_folder),
+            "--scratch", str(scratch_folder),
+            "--logfolder", str(log_folder),
+            "z3;./build/bin/cvc5",  # Positional: SOLVER_CLIS
+            str(input_file)  # Positional: PATH_TO_SEEDS
         ]
         
         try:

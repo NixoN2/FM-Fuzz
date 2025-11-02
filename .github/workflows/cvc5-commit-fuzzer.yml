@@ -130,6 +130,10 @@ jobs:
           pip install yinyang
           pip install z3-solver
 
+      - name: Check typefuzz version
+        run: |
+          typefuzz --version || typefuzz --help | head -20
+
       - name: Build cvc5
         run: |
           ./scripts/cvc5/build.sh --coverage
