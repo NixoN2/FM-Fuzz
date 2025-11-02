@@ -62,19 +62,25 @@ class CommitFuzzer:
         ]
         
         try:
-            # Capture stderr to see what's wrong, but keep stdout quiet
+            # Capture both stdout and stderr to see what's happening
             result = subprocess.run(
                 cmd,
                 cwd=self.build_dir.parent,
-                stdout=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 check=False
             )
+            
+            # Print typefuzz output if there's any (even in quiet mode, errors might show)
+            if result.stdout:
+                print(f"\n[typefuzz stdout]: {result.stdout[:200]}", file=sys.stderr)
+            if result.stderr:
+                print(f"\n[typefuzz stderr]: {result.stderr[:200]}", file=sys.stderr)
+            
             if result.returncode != 0:
                 print(f"✗ typefuzz failed (exit code {result.returncode})", end=" ", flush=True)
                 if result.stderr:
-                    # Show first line of error if available
                     error_first_line = result.stderr.strip().split('\n')[0]
                     if error_first_line:
                         print(f"- {error_first_line[:100]}")
@@ -91,14 +97,22 @@ class CommitFuzzer:
     def find_latest_mutant(self, scratch_folder: Path) -> Optional[Path]:
         """Find the most recently modified .smt2 file in the scratch folder"""
         if not scratch_folder.exists():
+            print(f"  [DEBUG] Scratch folder does not exist: {scratch_folder}", file=sys.stderr)
             return None
         
         mutants = list(scratch_folder.rglob("*.smt2"))
         if not mutants:
+            print(f"  [DEBUG] No .smt2 files found in {scratch_folder}", file=sys.stderr)
+            # List what files are actually there
+            all_files = list(scratch_folder.rglob("*"))
+            if all_files:
+                print(f"  [DEBUG] Found files in scratch: {[str(f.relative_to(scratch_folder)) for f in all_files[:10]]}", file=sys.stderr)
             return None
         
         # Return the most recently modified file
-        return max(mutants, key=lambda p: p.stat().st_mtime)
+        latest = max(mutants, key=lambda p: p.stat().st_mtime)
+        print(f"  [DEBUG] Found {len(mutants)} mutant(s), latest: {latest.name}", file=sys.stderr)
+        return latest
     
     def cleanup_old_mutants(self, scratch_folder: Path, current_mutant: Path, keep_recent: int = 5):
         """
