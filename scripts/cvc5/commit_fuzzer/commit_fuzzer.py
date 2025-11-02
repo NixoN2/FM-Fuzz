@@ -53,7 +53,7 @@ class CommitFuzzer:
             "--scratch", str(scratch_folder),
             "--logfolder", str(log_folder),
             "-i", "1",  # Single iteration
-            "-km",  # KEEP MUTANTS - critical for chaining iterations
+            "--keep-mutants",  # KEEP MUTANTS - critical for chaining iterations
             "-q",  # Quiet mode
             "z3;./build/bin/cvc5",
             str(input_file)
