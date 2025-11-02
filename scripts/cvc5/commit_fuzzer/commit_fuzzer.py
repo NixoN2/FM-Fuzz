@@ -95,18 +95,34 @@ class CommitFuzzer:
             return False
     
     def find_latest_mutant(self, scratch_folder: Path) -> Optional[Path]:
-        """Find the most recently modified .smt2 file in the scratch folder"""
+        """
+        Find the most recently modified .smt2 file in the scratch folder.
+        Note: typefuzz may store mutants in subdirectories, so we search recursively.
+        """
         if not scratch_folder.exists():
             print(f"  [DEBUG] Scratch folder does not exist: {scratch_folder}", file=sys.stderr)
             return None
         
+        # Search for .smt2 files recursively in scratch folder
         mutants = list(scratch_folder.rglob("*.smt2"))
+        
         if not mutants:
             print(f"  [DEBUG] No .smt2 files found in {scratch_folder}", file=sys.stderr)
-            # List what files are actually there
-            all_files = list(scratch_folder.rglob("*"))
-            if all_files:
-                print(f"  [DEBUG] Found files in scratch: {[str(f.relative_to(scratch_folder)) for f in all_files[:10]]}", file=sys.stderr)
+            # List what files/directories are actually there for debugging
+            try:
+                all_items = list(scratch_folder.iterdir())
+                if all_items:
+                    print(f"  [DEBUG] Scratch folder contents: {[item.name for item in all_items[:10]]}", file=sys.stderr)
+                    # Also check subdirectories
+                    for item in all_items:
+                        if item.is_dir():
+                            sub_items = list(item.iterdir())
+                            if sub_items:
+                                print(f"  [DEBUG] Subdirectory {item.name} contents: {[sub.name for sub in sub_items[:5]]}", file=sys.stderr)
+                else:
+                    print(f"  [DEBUG] Scratch folder is empty", file=sys.stderr)
+            except Exception as e:
+                print(f"  [DEBUG] Error listing scratch folder: {e}", file=sys.stderr)
             return None
         
         # Return the most recently modified file
@@ -292,7 +308,8 @@ class CommitFuzzer:
             coverage_samples: List[Tuple[int, int, float]] = []  # (iteration, arcs, elapsed_time)
             start_time = time.time()
             
-            # Start with the original test file
+            # Start with the original test file for iteration 1
+            # Subsequent iterations will use mutants from scratch folder
             current_input = test_path
             
             # Run iterations one at a time
@@ -304,13 +321,29 @@ class CommitFuzzer:
                         print(f"\nTotal timeout ({timeout}s) reached at iteration {iteration}")
                         break
                 
+                # For iteration 1: use original seed from test/regress/cli
+                # For iteration 2+: use mutant from scratch folder
+                if iteration == 1:
+                    current_input = test_path
+                    print(f"Iteration {iteration}/{iterations} (seed: {test_name})...", end=" ", flush=True)
+                else:
+                    # Find the latest mutant from previous iteration
+                    latest_mutant = self.find_latest_mutant(scratch_folder)
+                    if not latest_mutant:
+                        print(f"\n✗ No mutant found after iteration {iteration-1}, stopping")
+                        break
+                    current_input = latest_mutant
+                    print(f"Iteration {iteration}/{iterations} (mutant: {latest_mutant.name})...", end=" ", flush=True)
+                    
+                    # Clean up old mutants (keep only recent ones)
+                    if iteration > 2:  # Don't clean up on first two iterations
+                        self.cleanup_old_mutants(scratch_folder, latest_mutant, keep_mutants)
+                
                 # Reset coverage BEFORE each iteration to measure coverage from this iteration only
                 # This ensures we measure coverage from the current mutant/test, not accumulated
                 self.reset_coverage_counters()
                 
                 # Run single iteration on current input (seed or previous mutant)
-                print(f"Iteration {iteration}/{iterations}...", end=" ", flush=True)
-                
                 success = self.run_typefuzz_single_iteration(
                     current_input, bugs_folder, scratch_folder, log_folder
                 )
@@ -334,20 +367,6 @@ class CommitFuzzer:
                 else:
                     print("✗ Failed to extract coverage")
                     sys.stdout.flush()
-                
-                # Find the latest mutant to use as input for next iteration
-                # Note: With -k flag, mutants are kept. If mutation failed, no file is created.
-                latest_mutant = self.find_latest_mutant(scratch_folder)
-                if latest_mutant:
-                    # Clean up old mutants before using the new one
-                    if iteration > 1:  # Don't clean up on first iteration
-                        self.cleanup_old_mutants(scratch_folder, latest_mutant, keep_mutants)
-                    
-                    current_input = latest_mutant
-                else:
-                    # No mutant found - mutation may have failed or no mutant was generated
-                    print("✗ No mutant found (mutation may have failed), stopping")
-                    break
                 
                 # Clean up temp coverage file
                 try:
