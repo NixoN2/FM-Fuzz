@@ -48,9 +48,11 @@ class CommitFuzzer:
         
         # Build typefuzz command with 1 iteration
         # Note: Flags must come before positional arguments (SOLVER_CLIS and PATH_TO_SEEDS)
+        # Use -m 1 to ensure every iteration is tested (default modulo is 2, which skips iteration 1)
         cmd = [
             "typefuzz",
             "-i", "1",  # Single iteration
+            "-m", "1",  # Modulo 1: test every mutant (not default 2)
             "--keep-mutants",  # KEEP MUTANTS - critical for chaining iterations
             "-q",  # Quiet mode
             "--bugs", str(bugs_folder),
@@ -270,12 +272,8 @@ class CommitFuzzer:
             scratch_folder = temp_path / "scratch"
             log_folder = temp_path / "logs"
             
-            # Step 1: Reset coverage counters for isolation
-            print("\n[1/2] Resetting coverage counters...")
-            self.reset_coverage_counters()
-            
-            # Step 2: Run typefuzz iteratively, using each mutant as input for next iteration
-            print(f"\n[2/2] Running typefuzz with coverage recording after each mutant...")
+            # Step 1: Run typefuzz iteratively, using each mutant as input for next iteration
+            print(f"\n[1/1] Running typefuzz with coverage recording after each mutant...")
             print("="*60)
             
             coverage_samples: List[Tuple[int, int, float]] = []  # (iteration, arcs, elapsed_time)
@@ -292,6 +290,10 @@ class CommitFuzzer:
                     if elapsed_total >= timeout:
                         print(f"\nTotal timeout ({timeout}s) reached at iteration {iteration}")
                         break
+                
+                # Reset coverage BEFORE each iteration to measure coverage from this iteration only
+                # This ensures we measure coverage from the current mutant/test, not accumulated
+                self.reset_coverage_counters()
                 
                 # Run single iteration on current input (seed or previous mutant)
                 print(f"Iteration {iteration}/{iterations}...", end=" ", flush=True)
