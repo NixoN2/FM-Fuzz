@@ -97,38 +97,64 @@ CVC4_PATH=$(realpath "$CVC4_PATH" 2>/dev/null || echo "$CVC4_PATH")
 CVC5_PATH=$(realpath "$CVC5_PATH" 2>/dev/null || echo "$CVC5_PATH")
 Z3_NEW="z3"
 
-run_fuzzer() {
+# Global queue management
+QUEUE_LOCK="/tmp/fuzzer_queue_${JOB_ID:-$$}.lock"
+QUEUE_FILE="/tmp/fuzzer_queue_${JOB_ID:-$$}.txt"
+JOB_START_TIME=$(date +%s)
+
+# Add test to end of queue (thread-safe)
+add_test_to_queue() {
   local test_name="$1"
-  local process_id="$2"
+  (
+    flock -x 200
+    echo "$test_name" >> "$QUEUE_FILE"
+  ) 200>"$QUEUE_LOCK"
+}
+
+# Check if we've exceeded the timeout
+is_timeout_expired() {
+  if [[ "$TIMEOUT_SECONDS" -le 0 ]]; then
+    return 1  # No timeout
+  fi
+  local current_time=$(date +%s)
+  local elapsed=$((current_time - JOB_START_TIME))
+  if [[ $elapsed -ge $TIMEOUT_SECONDS ]]; then
+    return 0  # Timeout expired
+  fi
+  return 1  # Still within timeout
+}
+
+# Run fuzzer on a single test
+run_fuzzer_on_test() {
+  local test_name="$1"
+  local worker_id="$2"
   
-  # Create unique folders for this process
-  local bugs_folder="bugs_${process_id}"
-  local scratch_folder="scratch_${process_id}"
-  local log_folder="logs_${process_id}"
+  # Create unique folders for this worker (reused across tests)
+  local bugs_folder="bugs_${worker_id}"
+  local scratch_folder="scratch_${worker_id}"
+  local log_folder="logs_${worker_id}"
   
-  # Clean up any existing folders
-  rm -rf "$bugs_folder" "$scratch_folder" "$log_folder"
+  # Clean up scratch and log folders for fresh run (keep bugs folder)
+  rm -rf "$scratch_folder" "$log_folder"
   mkdir -p "$bugs_folder" "$scratch_folder" "$log_folder"
   
   local test_path="$TESTS_ROOT/$test_name"
   
   if [[ ! -f "$test_path" ]]; then
-    echo "[PROCESS $process_id] Error: Test file not found: $test_path" >&2
+    echo "[WORKER $worker_id] Error: Test file not found: $test_path" >&2
     return 1
   fi
   
-  echo "[PROCESS $process_id] Starting fuzzer on: $test_name"
-  echo "[PROCESS $process_id] Using folders: bugs=$bugs_folder, scratch=$scratch_folder, log=$log_folder"
-  echo "[PROCESS $process_id] Found test file: $test_path"
+  echo "[WORKER $worker_id] Starting fuzzer on: $test_name"
   
   # Build typefuzz command with all 4 solvers: z3-new, z3-old, cvc5, cvc4-1.6
   local solver_clis="$Z3_NEW;$Z3_OLD_PATH;$CVC5_PATH;$CVC4_PATH"
   
-  # Timeout wrapper if timeout > 0
-  local timeout_cmd=""
-  if [[ "$TIMEOUT_SECONDS" -gt 0 ]]; then
-    timeout_cmd="timeout -s 9 $TIMEOUT_SECONDS"
-  fi
+  # Don't apply timeout per test - we want tests to run as long as needed
+  # The job-level timeout (6 hours) is handled by worker_process timeout check
+  # Use a large per-test timeout (24 hours) as a safety net
+  local per_test_timeout=86400  # 24 hours (safety net, shouldn't be reached)
+  local timeout_cmd="timeout -s 9 $per_test_timeout"
   
   # Run typefuzz
   local typefuzz_cmd=(
@@ -143,7 +169,7 @@ run_fuzzer() {
   )
   
   set +e  # Don't exit on error, we want to check bugs even if typefuzz fails
-  "${typefuzz_cmd[@]}" > "/tmp/typefuzz_${process_id}.out" 2> "/tmp/typefuzz_${process_id}.err"
+  "${typefuzz_cmd[@]}" > "/tmp/typefuzz_${worker_id}.out" 2> "/tmp/typefuzz_${worker_id}.err"
   local exit_code=$?
   set -e
   
@@ -158,31 +184,111 @@ run_fuzzer() {
   fi
   
   if [[ "$bug_count" -gt 0 ]]; then
-    echo "[PROCESS $process_id] ✓ Found $bug_count bug(s)!"
+    echo "[WORKER $worker_id] ✓ Found $bug_count bug(s) on $test_name!"
     for bug_file in "${bug_files[@]}"; do
-      echo "[PROCESS $process_id] Bug file: $bug_file"
-      echo "[PROCESS $process_id] Bug file content:"
-      echo "[PROCESS $process_id] ============================================================"
-      cat "$bug_file" | sed "s/^/[PROCESS $process_id] /"
-      echo "[PROCESS $process_id] ============================================================"
+      echo "[WORKER $worker_id] Bug file: $bug_file"
+      echo "[WORKER $worker_id] Bug file content:"
+      echo "[WORKER $worker_id] ============================================================"
+      cat "$bug_file" | sed "s/^/[WORKER $worker_id] /"
+      echo "[WORKER $worker_id] ============================================================"
     done
   else
-    echo "[PROCESS $process_id] No bugs found"
+    echo "[WORKER $worker_id] No bugs found on $test_name"
   fi
   
-  # Show output if there was an error
-  if [[ $exit_code -ne 0 ]]; then
-    echo "[PROCESS $process_id] typefuzz exited with code $exit_code"
-    if [[ -s "/tmp/typefuzz_${process_id}.err" ]]; then
-      echo "[PROCESS $process_id] Error output:"
-      head -20 "/tmp/typefuzz_${process_id}.err" | sed 's/^/  /'
+  # Handle exit codes: 10 = bugs found (success), 3 = error (reallocate immediately), others = show
+  if [[ $exit_code -eq 10 ]]; then
+    # Exit code 10 means bugs were found - this is success
+    if [[ "$bug_count" -eq 0 ]]; then
+      echo "[WORKER $worker_id] typefuzz exited with code 10 but no bugs found in folder"
+    fi
+  elif [[ $exit_code -eq 3 ]]; then
+    echo "[WORKER $worker_id] typefuzz exited with code 3 on $test_name (unsupported operation - reallocating)"
+    if [[ -s "/tmp/typefuzz_${worker_id}.err" ]]; then
+      echo "[WORKER $worker_id] Error output:"
+      head -10 "/tmp/typefuzz_${worker_id}.err" | sed 's/^/  /'
+    fi
+  elif [[ $exit_code -ne 0 ]]; then
+    echo "[WORKER $worker_id] typefuzz exited with code $exit_code on $test_name"
+    if [[ -s "/tmp/typefuzz_${worker_id}.err" ]]; then
+      echo "[WORKER $worker_id] Error output:"
+      head -10 "/tmp/typefuzz_${worker_id}.err" | sed 's/^/  /'
     fi
   fi
   
-  echo "[PROCESS $process_id] Completed fuzzing on: $test_name"
+  echo "[WORKER $worker_id] Completed fuzzing on: $test_name (exit code: $exit_code)"
   
   # Clean up temp files
-  rm -f "/tmp/typefuzz_${process_id}.out" "/tmp/typefuzz_${process_id}.err"
+  rm -f "/tmp/typefuzz_${worker_id}.out" "/tmp/typefuzz_${worker_id}.err"
+  
+  # Return exit code for decision making
+  return $exit_code
+}
+
+# Worker process that continuously pulls from queue
+worker_process() {
+  local worker_id="$1"
+  
+  while true; do
+    # Check timeout first
+    if is_timeout_expired; then
+      echo "[WORKER $worker_id] Timeout expired (${TIMEOUT_SECONDS}s), stopping"
+      break
+    fi
+    
+    # Get next test from queue (thread-safe)
+    local test_name=""
+    
+    # Use flock to atomically read and remove first line from queue
+    (
+      flock -x 200
+      if [[ -f "$QUEUE_FILE" && -s "$QUEUE_FILE" ]]; then
+        test_name=$(head -n 1 "$QUEUE_FILE")
+        # Remove first line if we got a test
+        if [[ -n "$test_name" ]]; then
+          tail -n +2 "$QUEUE_FILE" > "${QUEUE_FILE}.tmp" && mv "${QUEUE_FILE}.tmp" "$QUEUE_FILE"
+        fi
+      fi
+    ) 200>"$QUEUE_LOCK"
+    
+    # If no test available, wait a bit and check again (might be re-queued)
+    if [[ -z "$test_name" ]]; then
+      # Check if queue is truly empty or just temporarily empty
+      sleep 2
+      (
+        flock -x 200
+        if [[ -f "$QUEUE_FILE" && -s "$QUEUE_FILE" ]]; then
+          continue  # Queue has tests, continue loop
+        fi
+      ) 200>"$QUEUE_LOCK"
+      # If still empty after wait and timeout not expired, check once more
+      if is_timeout_expired || [[ ! -f "$QUEUE_FILE" || ! -s "$QUEUE_FILE" ]]; then
+        break
+      fi
+      continue
+    fi
+    
+    # Run fuzzer on this test
+    run_fuzzer_on_test "$test_name" "$worker_id"
+    local exit_code=$?
+    
+    # Handle exit codes
+    if [[ $exit_code -eq 10 ]]; then
+      # Exit code 10 = bugs found! Re-queue this test to continue fuzzing
+      echo "[WORKER $worker_id] Re-queuing $test_name to continue finding more bugs"
+      add_test_to_queue "$test_name"
+      # Continue to next test immediately (don't wait)
+    elif [[ $exit_code -eq 3 ]]; then
+      # Exit code 3 = unsupported operation, skip this test
+      echo "[WORKER $worker_id] Skipping $test_name (exit code 3), moving to next"
+      # Continue to next test
+    else
+      # Other exit codes (0, timeout, etc.) - test is done, move to next
+      # Continue to next test
+    fi
+  done
+  
+  echo "[WORKER $worker_id] Finished - no more tests in queue or timeout expired"
 }
 
 num_tests=$(echo "$TESTS_JSON" | jq 'length')
@@ -198,20 +304,40 @@ echo "Iterations per test: $ITERATIONS"
 echo "Solvers: z3-new=$Z3_NEW, z3-old=$Z3_OLD_PATH, cvc5=$CVC5_PATH, cvc4=$CVC4_PATH"
 echo ""
 
-# Run each test in parallel (background processes)
-proc_id=0
+# Create test queue file
+rm -f "$QUEUE_FILE" "$QUEUE_LOCK"
+touch "$QUEUE_FILE"
+
+# Populate queue with all tests
 for i in $(seq 0 $((num_tests - 1))); do
   test_name=$(echo "$TESTS_JSON" | jq -r ".[$i] // empty")
   if [[ -n "$test_name" && "$test_name" != "null" ]]; then
-    proc_id=$((proc_id + 1))
-    run_fuzzer "$test_name" "$proc_id" &
+    echo "$test_name" >> "$QUEUE_FILE"
   fi
 done
 
-wait
+# Use 4 workers (can be scaled later)
+NUM_WORKERS=4
+
+echo "Starting $NUM_WORKERS worker(s) to process $num_tests test(s) from queue"
+echo "Workers will automatically reallocate tests when exit code 3 occurs"
+echo ""
+
+# Start worker processes
+worker_pids=()
+for worker_id in $(seq 1 $NUM_WORKERS); do
+  worker_process "$worker_id" &
+  worker_pids+=($!)
+done
+
+# Wait for all workers to complete
+wait "${worker_pids[@]}"
+
+# Clean up queue files
+rm -f "$QUEUE_FILE" "$QUEUE_LOCK"
 
 echo ""
-echo "All fuzzing processes completed${JOB_ID:+ for job $JOB_ID}."
+echo "All fuzzing workers completed${JOB_ID:+ for job $JOB_ID}."
 echo ""
 
 # Aggregate and report bugs found
@@ -220,8 +346,8 @@ echo "BUG SUMMARY${JOB_ID:+ FOR JOB $JOB_ID}"
 echo "============================================================"
 
 total_bugs=0
-for proc_id in $(seq 1 $proc_id); do
-  bugs_folder="bugs_${proc_id}"
+for worker_id in $(seq 1 $NUM_WORKERS); do
+  bugs_folder="bugs_${worker_id}"
   if [[ -d "$bugs_folder" ]]; then
     while IFS= read -r -d '' bug_file; do
       if [[ -f "$bug_file" ]]; then
@@ -244,4 +370,5 @@ else
 fi
 
 echo "============================================================"
+echo "Versions: z3-new=$Z3_NEW, z3-old=$Z3_OLD_PATH, cvc5=$CVC5_PATH, cvc4=$CVC4_PATH"
 

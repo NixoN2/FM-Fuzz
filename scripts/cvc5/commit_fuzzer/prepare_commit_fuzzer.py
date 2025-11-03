@@ -955,20 +955,38 @@ def main():
           f"coverage: {result['summary']['coverage_percentage']:.1f}%")
     
     if args.output_matrix:
-        # Group tests into jobs
-        tests_per_job = args.tests_per_job
+        total_tests = len(unique_tests)
         max_jobs = args.max_jobs
         
-        # Limit total tests if max_jobs is specified
-        if max_jobs is not None:
-            max_tests = max_jobs * tests_per_job
-            if len(unique_tests) > max_tests:
-                unique_tests = unique_tests[:max_tests]
-                print(f"Limited to {max_tests} tests due to max-jobs={max_jobs}")
+        # Calculate optimal tests_per_job to stay under max_jobs limit
+        if max_jobs is not None and total_tests > 0:
+            # If user specified tests_per_job explicitly, check if it fits
+            if args.tests_per_job != 1:  # User explicitly set it
+                calculated_jobs = (total_tests + args.tests_per_job - 1) // args.tests_per_job
+                if calculated_jobs > max_jobs:
+                    print(f"Warning: {args.tests_per_job} tests per job would create {calculated_jobs} jobs (exceeds max {max_jobs})")
+                    # Calculate optimal value
+                    tests_per_job = max(1, (total_tests + max_jobs - 1) // max_jobs)  # ceil division
+                    actual_jobs = (total_tests + tests_per_job - 1) // tests_per_job
+                    print(f"Using calculated value: {tests_per_job} tests per job = {actual_jobs} jobs")
+                else:
+                    tests_per_job = args.tests_per_job
+                    actual_jobs = calculated_jobs
+            else:
+                # Calculate optimal tests_per_job to fit within max_jobs
+                tests_per_job = max(1, (total_tests + max_jobs - 1) // max_jobs)  # ceil division
+                actual_jobs = (total_tests + tests_per_job - 1) // tests_per_job  # ceil division
+            
+            print(f"Total tests: {total_tests}, max_jobs: {max_jobs}")
+            print(f"Allocation: {tests_per_job} tests per job = {actual_jobs} jobs")
+        else:
+            # No max_jobs limit, use user-specified or default
+            tests_per_job = args.tests_per_job
+            actual_jobs = (total_tests + tests_per_job - 1) // tests_per_job if total_tests > 0 else 0
         
         # Group tests into jobs
         jobs = []
-        for i in range(0, len(unique_tests), tests_per_job):
+        for i in range(0, total_tests, tests_per_job):
             job_tests = unique_tests[i:i + tests_per_job]
             job_id = i // tests_per_job
             
@@ -980,14 +998,15 @@ def main():
         
         matrix_data = {
             'matrix': {'include': jobs},
-            'total_tests': len(unique_tests),
-            'total_jobs': len(jobs)
+            'total_tests': total_tests,
+            'total_jobs': len(jobs),
+            'tests_per_job': tests_per_job
         }
         
         with open(args.output_matrix, 'w') as f:
             json.dump(matrix_data, f, indent=2)
         
-        print(f"Matrix written to {args.output_matrix} with {len(unique_tests)} tests in {len(jobs)} jobs ({tests_per_job} tests per job)")
+        print(f"Matrix written to {args.output_matrix} with {total_tests} tests in {len(jobs)} jobs ({tests_per_job} tests per job)")
     
     return 0
 
