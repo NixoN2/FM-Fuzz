@@ -255,16 +255,32 @@ worker_process() {
     if [[ -z "$test_name" ]]; then
       # Check if queue is truly empty or just temporarily empty
       sleep 2
+      
+      # Check queue status (using flock for safety)
+      local queue_has_tests=false
       (
         flock -x 200
         if [[ -f "$QUEUE_FILE" && -s "$QUEUE_FILE" ]]; then
-          continue  # Queue has tests, continue loop
+          echo "true" > "/tmp/queue_check_${JOB_ID:-$$}_${worker_id}.txt"
         fi
       ) 200>"$QUEUE_LOCK"
-      # If still empty after wait and timeout not expired, check once more
-      if is_timeout_expired || [[ ! -f "$QUEUE_FILE" || ! -s "$QUEUE_FILE" ]]; then
+      
+      if [[ -f "/tmp/queue_check_${JOB_ID:-$$}_${worker_id}.txt" ]]; then
+        queue_has_tests=true
+        rm -f "/tmp/queue_check_${JOB_ID:-$$}_${worker_id}.txt"
+      fi
+      
+      # If queue has tests, continue loop to get one
+      if [[ "$queue_has_tests" == "true" ]]; then
+        continue
+      fi
+      
+      # If still empty after wait and timeout expired, exit
+      if is_timeout_expired; then
         break
       fi
+      
+      # If queue is still empty and no timeout, wait a bit more
       continue
     fi
     
