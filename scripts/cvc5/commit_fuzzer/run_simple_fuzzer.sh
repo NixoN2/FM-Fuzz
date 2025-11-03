@@ -100,7 +100,27 @@ Z3_NEW="z3"
 # Global queue management
 QUEUE_LOCK="/tmp/fuzzer_queue_${JOB_ID:-$$}.lock"
 QUEUE_FILE="/tmp/fuzzer_queue_${JOB_ID:-$$}.txt"
-JOB_START_TIME=$(date +%s)
+REPORTED_BUGS_FILE="/tmp/reported_bugs_${JOB_ID:-$$}.txt"
+REPORTED_BUGS_LOCK="/tmp/reported_bugs_${JOB_ID:-$$}.lock"
+FIVE_MIN_WARNING_FILE="/tmp/five_min_warning_${JOB_ID:-$$}.txt"
+
+# Get job start time - use GitHub Actions job start time if available, otherwise script start time
+# GITHUB_RUN_STARTED_AT is in ISO 8601 format: YYYY-MM-DDTHH:MM:SSZ
+if [[ -n "${GITHUB_RUN_STARTED_AT:-}" ]]; then
+  # Parse ISO 8601 timestamp and convert to Unix timestamp
+  # Works with both date command on Linux and macOS
+  JOB_START_TIME=$(date -u -d "${GITHUB_RUN_STARTED_AT}" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "${GITHUB_RUN_STARTED_AT}" +%s 2>/dev/null || date +%s)
+  # If parsing failed, fall back to current time
+  if [[ -z "$JOB_START_TIME" ]] || [[ ! "$JOB_START_TIME" =~ ^[0-9]+$ ]]; then
+    JOB_START_TIME=$(date +%s)
+  fi
+else
+  JOB_START_TIME=$(date +%s)
+fi
+
+# GitHub Actions job timeout (6 hours = 21600 seconds by default)
+# This represents the TOTAL job timeout, not just script execution time
+GITHUB_JOB_TIMEOUT=21600  # 6 hours in seconds
 
 # Add test to end of queue (thread-safe)
 add_test_to_queue() {
@@ -111,17 +131,109 @@ add_test_to_queue() {
   ) 200>"$QUEUE_LOCK"
 }
 
-# Check if we've exceeded the timeout
+# Get time remaining in seconds based on GitHub Actions job timeout
+get_time_remaining() {
+  local current_time=$(date +%s)
+  local elapsed=$((current_time - JOB_START_TIME))
+  local remaining=$((GITHUB_JOB_TIMEOUT - elapsed))
+  if [[ $remaining -lt 0 ]]; then
+    echo "0"
+  else
+    echo "$remaining"
+  fi
+}
+
+# Check if we've exceeded the timeout (for script-level timeout)
 is_timeout_expired() {
   if [[ "$TIMEOUT_SECONDS" -le 0 ]]; then
     return 1  # No timeout
   fi
   local current_time=$(date +%s)
-  local elapsed=$((current_time - JOB_START_TIME))
-  if [[ $elapsed -ge $TIMEOUT_SECONDS ]]; then
-    return 0  # Timeout expired
+  local script_elapsed=$((current_time - JOB_START_TIME))
+  if [[ $script_elapsed -ge $TIMEOUT_SECONDS ]]; then
+    return 0  # Script timeout expired
   fi
   return 1  # Still within timeout
+}
+
+# Check if we're 5 minutes or less from GitHub Actions job timeout
+is_5_minutes_left() {
+  local remaining=$(get_time_remaining)
+  if [[ "$remaining" == "0" ]]; then
+    return 0  # Time is up
+  fi
+  if [[ $remaining -le 300 ]]; then  # 5 minutes = 300 seconds
+    return 0  # 5 minutes or less left
+  fi
+  return 1  # More than 5 minutes left
+}
+
+# Check if bug has already been reported (thread-safe)
+is_bug_already_reported() {
+  local bug_file="$1"
+  if [[ ! -f "$bug_file" ]]; then
+    return 1  # Not reported if file doesn't exist
+  fi
+  
+  local bug_file_abs=$(realpath "$bug_file" 2>/dev/null || echo "$bug_file")
+  (
+    flock -x 203
+    if [[ -f "$REPORTED_BUGS_FILE" ]]; then
+      grep -Fxq "$bug_file_abs" "$REPORTED_BUGS_FILE" 2>/dev/null && return 0
+    fi
+    return 1
+  ) 203>"$REPORTED_BUGS_LOCK"
+}
+
+# Mark bug as reported (thread-safe)
+mark_bug_as_reported() {
+  local bug_file="$1"
+  local bug_file_abs=$(realpath "$bug_file" 2>/dev/null || echo "$bug_file")
+  (
+    flock -x 203
+    echo "$bug_file_abs" >> "$REPORTED_BUGS_FILE"
+  ) 203>"$REPORTED_BUGS_LOCK"
+}
+
+# Output bug summary (only unreported bugs)
+output_bug_summary() {
+  local summary_title="$1"
+  echo ""
+  echo "============================================================"
+  echo "$summary_title${JOB_ID:+ FOR JOB $JOB_ID}"
+  echo "============================================================"
+  
+  local total_bugs=0
+  local unreported_bugs=0
+  for worker_id in $(seq 1 $NUM_WORKERS); do
+    bugs_folder="bugs_${worker_id}"
+    if [[ -d "$bugs_folder" ]]; then
+      while IFS= read -r -d '' bug_file; do
+        if [[ -f "$bug_file" ]]; then
+          total_bugs=$((total_bugs + 1))
+          # Check if we've already reported this bug
+          if ! is_bug_already_reported "$bug_file"; then
+            unreported_bugs=$((unreported_bugs + 1))
+            mark_bug_as_reported "$bug_file"
+            echo ""
+            echo "Bug #$unreported_bugs from $bugs_folder: $bug_file"
+            echo "============================================================"
+            cat "$bug_file"
+            echo "============================================================"
+          fi
+        fi
+      done < <(find "$bugs_folder" -type f \( -name "*.smt2" -o -name "*.smt" \) -print0 2>/dev/null || true)
+    fi
+  done
+  
+  if [[ $total_bugs -gt 0 ]]; then
+    echo ""
+    echo "Total bugs found: $total_bugs (unreported: $unreported_bugs)"
+  else
+    echo "No bugs found in any process."
+  fi
+  
+  echo "============================================================"
 }
 
 # Run fuzzer on a single test
@@ -173,47 +285,67 @@ run_fuzzer_on_test() {
   local exit_code=$?
   set -e
   
-  # Check for bugs
-  local bug_count=0
-  local bug_files=()
-  if [[ -d "$bugs_folder" ]]; then
-    while IFS= read -r -d '' bug_file; do
-      bug_files+=("$bug_file")
-      bug_count=$((bug_count + 1))
-    done < <(find "$bugs_folder" -type f \( -name "*.smt2" -o -name "*.smt" \) -print0 2>/dev/null || true)
-  fi
-  
-  if [[ "$bug_count" -gt 0 ]]; then
-    echo "[WORKER $worker_id] ✓ Found $bug_count bug(s) on $test_name!"
-    for bug_file in "${bug_files[@]}"; do
-      echo "[WORKER $worker_id] Bug file: $bug_file"
-      echo "[WORKER $worker_id] Bug file content:"
-      echo "[WORKER $worker_id] ============================================================"
-      cat "$bug_file" | sed "s/^/[WORKER $worker_id] /"
-      echo "[WORKER $worker_id] ============================================================"
-    done
-  else
-    echo "[WORKER $worker_id] No bugs found on $test_name"
-  fi
-  
-  # Handle exit codes: 10 = bugs found (success), 3 = error (reallocate immediately), others = show
-  if [[ $exit_code -eq 10 ]]; then
-    # Exit code 10 means bugs were found - this is success
-    if [[ "$bug_count" -eq 0 ]]; then
-      echo "[WORKER $worker_id] typefuzz exited with code 10 but no bugs found in folder"
-    fi
-  elif [[ $exit_code -eq 3 ]]; then
-    echo "[WORKER $worker_id] typefuzz exited with code 3 on $test_name (unsupported operation - reallocating)"
+  # Handle exit code 3 immediately
+  if [[ $exit_code -eq 3 ]]; then
+    echo "[WORKER $worker_id] ⚠ EXIT CODE 3: $test_name (unsupported operation - reallocating)"
     if [[ -s "/tmp/typefuzz_${worker_id}.err" ]]; then
       echo "[WORKER $worker_id] Error output:"
       head -10 "/tmp/typefuzz_${worker_id}.err" | sed 's/^/  /'
     fi
-  elif [[ $exit_code -ne 0 ]]; then
+    echo "[WORKER $worker_id] Completed fuzzing on: $test_name (exit code: $exit_code)"
+    rm -f "/tmp/typefuzz_${worker_id}.out" "/tmp/typefuzz_${worker_id}.err"
+    return $exit_code
+  fi
+  
+  # Handle exit code 10 (bugs found) - output bugs immediately (only unreported ones)
+  if [[ $exit_code -eq 10 ]]; then
+    echo "[WORKER $worker_id] ✓ Exit code 10: Bugs found on $test_name!"
+    # Check for bugs and output only unreported ones
+    local bug_count=0
+    local new_bug_count=0
+    local bug_files=()
+    local new_bug_files=()
+    if [[ -d "$bugs_folder" ]]; then
+      while IFS= read -r -d '' bug_file; do
+        bug_files+=("$bug_file")
+        bug_count=$((bug_count + 1))
+        # Check if this bug has already been reported
+        if ! is_bug_already_reported "$bug_file"; then
+          new_bug_files+=("$bug_file")
+          new_bug_count=$((new_bug_count + 1))
+          mark_bug_as_reported "$bug_file"
+        fi
+      done < <(find "$bugs_folder" -type f \( -name "*.smt2" -o -name "*.smt" \) -print0 2>/dev/null || true)
+    fi
+    
+    if [[ "$new_bug_count" -gt 0 ]]; then
+      echo "[WORKER $worker_id] Found $new_bug_count new bug(s) (total in folder: $bug_count):"
+      for bug_file in "${new_bug_files[@]}"; do
+        echo "[WORKER $worker_id] Bug file: $bug_file"
+        echo "[WORKER $worker_id] Bug file content:"
+        echo "[WORKER $worker_id] ============================================================"
+        cat "$bug_file" | sed "s/^/[WORKER $worker_id] /"
+        echo "[WORKER $worker_id] ============================================================"
+      done
+    elif [[ "$bug_count" -gt 0 ]]; then
+      echo "[WORKER $worker_id] No new bugs found (all $bug_count bug(s) already reported)"
+    else
+      echo "[WORKER $worker_id] Warning: Exit code 10 but no bugs found in folder"
+    fi
+    echo "[WORKER $worker_id] Completed fuzzing on: $test_name (exit code: $exit_code)"
+    rm -f "/tmp/typefuzz_${worker_id}.out" "/tmp/typefuzz_${worker_id}.err"
+    return $exit_code
+  fi
+  
+  # Handle other exit codes
+  if [[ $exit_code -ne 0 ]]; then
     echo "[WORKER $worker_id] typefuzz exited with code $exit_code on $test_name"
     if [[ -s "/tmp/typefuzz_${worker_id}.err" ]]; then
       echo "[WORKER $worker_id] Error output:"
       head -10 "/tmp/typefuzz_${worker_id}.err" | sed 's/^/  /'
     fi
+  else
+    echo "[WORKER $worker_id] No bugs found on $test_name"
   fi
   
   echo "[WORKER $worker_id] Completed fuzzing on: $test_name (exit code: $exit_code)"
@@ -336,6 +468,23 @@ echo "Starting $NUM_WORKERS worker(s) to process $num_tests test(s) from queue"
 echo "Workers will automatically reallocate tests when exit code 3 occurs"
 echo ""
 
+# Background monitor to check for 5-minute warning
+time_monitor() {
+  while true; do
+    sleep 30  # Check every 30 seconds
+    # Check if 5 minutes left and output bug summary (only once)
+    if is_5_minutes_left && [[ ! -f "$FIVE_MIN_WARNING_FILE" ]]; then
+      local remaining=$(get_time_remaining)
+      if [[ "$remaining" != "N/A" && "$remaining" != "0" ]]; then
+        local remaining_min=$((remaining / 60))
+        echo "[TIME MONITOR] ⏰ WARNING: Only $remaining_min minute(s) remaining! Outputting bug summary..."
+        touch "$FIVE_MIN_WARNING_FILE"
+        output_bug_summary "BUG SUMMARY (5 MINUTES LEFT)"
+      fi
+    fi
+  done
+}
+
 # Start worker processes
 worker_pids=()
 for worker_id in $(seq 1 $NUM_WORKERS); do
@@ -343,8 +492,16 @@ for worker_id in $(seq 1 $NUM_WORKERS); do
   worker_pids+=($!)
 done
 
+# Start time monitor in background
+time_monitor &
+monitor_pid=$!
+
 # Wait for all workers to complete
 wait "${worker_pids[@]}"
+
+# Stop time monitor
+kill "$monitor_pid" 2>/dev/null || true
+wait "$monitor_pid" 2>/dev/null || true
 
 # Clean up queue files
 rm -f "$QUEUE_FILE" "$QUEUE_LOCK"
@@ -353,35 +510,12 @@ echo ""
 echo "All fuzzing workers completed${JOB_ID:+ for job $JOB_ID}."
 echo ""
 
-# Aggregate and report bugs found
-echo "============================================================"
-echo "BUG SUMMARY${JOB_ID:+ FOR JOB $JOB_ID}"
-echo "============================================================"
+# Final bug summary (only unreported bugs)
+output_bug_summary "FINAL BUG SUMMARY"
 
-total_bugs=0
-for worker_id in $(seq 1 $NUM_WORKERS); do
-  bugs_folder="bugs_${worker_id}"
-  if [[ -d "$bugs_folder" ]]; then
-    while IFS= read -r -d '' bug_file; do
-      if [[ -f "$bug_file" ]]; then
-        total_bugs=$((total_bugs + 1))
-        echo ""
-        echo "Bug #$total_bugs from $bugs_folder: $bug_file"
-        echo "============================================================"
-        cat "$bug_file"
-        echo "============================================================"
-      fi
-    done < <(find "$bugs_folder" -type f \( -name "*.smt2" -o -name "*.smt" \) -print0 2>/dev/null || true)
-  fi
-done
-
-if [[ $total_bugs -gt 0 ]]; then
-  echo ""
-  echo "Total bugs found: $total_bugs"
-else
-  echo "No bugs found in any process."
-fi
-
-echo "============================================================"
 echo "Versions: z3-new=$Z3_NEW, z3-old=$Z3_OLD_PATH, cvc5=$CVC5_PATH, cvc4=$CVC4_PATH"
+
+# Clean up temp files
+rm -f "$REPORTED_BUGS_FILE" "$REPORTED_BUGS_LOCK"
+rm -f "$FIVE_MIN_WARNING_FILE"
 
