@@ -282,9 +282,6 @@ worker_process() {
       # Exit code 3 = unsupported operation, skip this test
       echo "[WORKER $worker_id] Skipping $test_name (exit code 3), moving to next"
       # Continue to next test
-    else
-      # Other exit codes (0, timeout, etc.) - test is done, move to next
-      # Continue to next test
     fi
   done
   
