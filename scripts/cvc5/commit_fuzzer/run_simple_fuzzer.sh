@@ -107,7 +107,6 @@ fi
 
 GITHUB_JOB_TIMEOUT=21600  # 6 hours in seconds
 BUGS_FOLDER="bugs"
-REPORTED_BUGS_FILE="/tmp/reported_bugs_${JOB_ID:-$$}.txt"
 FIVE_MIN_WARNING_FILE="/tmp/five_min_warning_${JOB_ID:-$$}.txt"
 
 # Get time remaining in seconds based on GitHub Actions job timeout
@@ -134,27 +133,7 @@ is_5_minutes_left() {
   return 1
 }
 
-# Check if bug has already been reported
-is_bug_already_reported() {
-  local bug_file="$1"
-  if [[ ! -f "$bug_file" ]]; then
-    return 1
-  fi
-  local bug_file_abs=$(realpath "$bug_file" 2>/dev/null || echo "$bug_file")
-  if [[ -f "$REPORTED_BUGS_FILE" ]]; then
-    grep -Fxq "$bug_file_abs" "$REPORTED_BUGS_FILE" 2>/dev/null && return 0
-  fi
-  return 1
-}
-
-# Mark bug as reported
-mark_bug_as_reported() {
-  local bug_file="$1"
-  local bug_file_abs=$(realpath "$bug_file" 2>/dev/null || echo "$bug_file")
-  echo "$bug_file_abs" >> "$REPORTED_BUGS_FILE"
-}
-
-# Output bug summary (only unreported bugs)
+# Output bug summary
 output_bug_summary() {
   local summary_title="$1"
   echo ""
@@ -163,27 +142,22 @@ output_bug_summary() {
   echo "============================================================"
   
   local total_bugs=0
-  local unreported_bugs=0
   if [[ -d "$BUGS_FOLDER" ]]; then
     while IFS= read -r -d '' bug_file; do
       if [[ -f "$bug_file" ]]; then
         total_bugs=$((total_bugs + 1))
-        if ! is_bug_already_reported "$bug_file"; then
-          unreported_bugs=$((unreported_bugs + 1))
-          mark_bug_as_reported "$bug_file"
-          echo ""
-          echo "Bug #$unreported_bugs: $bug_file"
-          echo "============================================================"
-          cat "$bug_file"
-          echo "============================================================"
-        fi
+        echo ""
+        echo "Bug #$total_bugs: $bug_file"
+        echo "============================================================"
+        cat "$bug_file"
+        echo "============================================================"
       fi
     done < <(find "$BUGS_FOLDER" -type f \( -name "*.smt2" -o -name "*.smt" \) -print0 2>/dev/null || true)
   fi
   
   if [[ $total_bugs -gt 0 ]]; then
     echo ""
-    echo "Total bugs found: $total_bugs (unreported: $unreported_bugs)"
+    echo "Total bugs found: $total_bugs"
   else
     echo "No bugs found."
   fi
@@ -241,24 +215,17 @@ run_test_worker() {
   if [[ $exit_code -eq 10 ]]; then
     echo "[WORKER $worker_id] ✓ Exit code 10: Bugs found on $test_name!"
     local bug_count=0
-    local new_bug_count=0
     local bug_files=()
-    local new_bug_files=()
     if [[ -d "$bugs_folder" ]]; then
       while IFS= read -r -d '' bug_file; do
         bug_files+=("$bug_file")
         bug_count=$((bug_count + 1))
-        if ! is_bug_already_reported "$bug_file"; then
-          new_bug_files+=("$bug_file")
-          new_bug_count=$((new_bug_count + 1))
-          mark_bug_as_reported "$bug_file"
-        fi
       done < <(find "$bugs_folder" -type f \( -name "*.smt2" -o -name "*.smt" \) -print0 2>/dev/null || true)
     fi
     
-    if [[ "$new_bug_count" -gt 0 ]]; then
-      echo "[WORKER $worker_id] Found $new_bug_count new bug(s) (total in folder: $bug_count):"
-      for bug_file in "${new_bug_files[@]}"; do
+    if [[ "$bug_count" -gt 0 ]]; then
+      echo "[WORKER $worker_id] Found $bug_count bug(s):"
+      for bug_file in "${bug_files[@]}"; do
         echo "[WORKER $worker_id] Bug file: $bug_file"
         echo "[WORKER $worker_id] Bug file content:"
         echo "[WORKER $worker_id] ============================================================"
@@ -267,11 +234,9 @@ run_test_worker() {
       done
       # Move bugs to main bugs folder
       mkdir -p "$BUGS_FOLDER"
-      for bug_file in "${new_bug_files[@]}"; do
+      for bug_file in "${bug_files[@]}"; do
         mv "$bug_file" "$BUGS_FOLDER/" 2>/dev/null || true
       done
-    elif [[ "$bug_count" -gt 0 ]]; then
-      echo "[WORKER $worker_id] No new bugs found (all $bug_count bug(s) already reported)"
     else
       echo "[WORKER $worker_id] Warning: Exit code 10 but no bugs found in folder"
     fi
@@ -307,8 +272,6 @@ echo "Iterations per test: $ITERATIONS"
 echo "Solvers: z3-new=$Z3_NEW, z3-old=$Z3_OLD_PATH, cvc5=$CVC5_PATH, cvc4=$CVC4_PATH"
 echo ""
 
-# Initialize reported bugs file
-touch "$REPORTED_BUGS_FILE"
 mkdir -p "$BUGS_FOLDER"
 
 # Use 4 workers for parallel execution
@@ -421,4 +384,4 @@ output_bug_summary "FINAL BUG SUMMARY"
 echo "Versions: z3-new=$Z3_NEW, z3-old=$Z3_OLD_PATH, cvc5=$CVC5_PATH, cvc4=$CVC4_PATH"
 
 # Clean up temp files
-rm -f "$REPORTED_BUGS_FILE" "$FIVE_MIN_WARNING_FILE"
+rm -f "$FIVE_MIN_WARNING_FILE"
