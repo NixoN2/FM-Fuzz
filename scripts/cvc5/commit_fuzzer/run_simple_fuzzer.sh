@@ -108,6 +108,8 @@ fi
 GITHUB_JOB_TIMEOUT=21600  # 6 hours in seconds
 BUGS_FOLDER="bugs"
 FIVE_MIN_WARNING_FILE="/tmp/five_min_warning_${JOB_ID:-$$}.txt"
+SKIP_TESTS_FILE="/tmp/skip_tests_${JOB_ID:-$$}.txt"
+SKIP_TESTS_LOCK="/tmp/skip_tests_${JOB_ID:-$$}.lock"
 
 # Get time remaining in seconds based on GitHub Actions job timeout
 get_time_remaining() {
@@ -200,15 +202,17 @@ run_test_worker() {
   local exit_code=$?
   set -e
   
-  # Handle exit code 3
+  # Handle exit code 3 - mark test as skipped and continue
   if [[ $exit_code -eq 3 ]]; then
     echo "[WORKER $worker_id] ⚠ EXIT CODE 3: $test_name (unsupported operation - skipping)"
     if [[ -s "/tmp/typefuzz_${worker_id}.err" ]]; then
       echo "[WORKER $worker_id] Error output:"
       head -10 "/tmp/typefuzz_${worker_id}.err" | sed 's/^/  /'
     fi
+    # Mark test as skipped so we don't run it again
+    mark_test_as_skipped "$test_name"
     rm -f "/tmp/typefuzz_${worker_id}.out" "/tmp/typefuzz_${worker_id}.err"
-    return $exit_code
+    return 0  # Return success to continue fuzzing
   fi
   
   # Handle exit code 10 (bugs found)
@@ -241,7 +245,7 @@ run_test_worker() {
       echo "[WORKER $worker_id] Warning: Exit code 10 but no bugs found in folder"
     fi
     rm -f "/tmp/typefuzz_${worker_id}.out" "/tmp/typefuzz_${worker_id}.err"
-    return $exit_code
+    return 0  # Return success to continue fuzzing
   fi
   
   if [[ $exit_code -ne 0 ]]; then
@@ -255,7 +259,7 @@ run_test_worker() {
   fi
   
   rm -f "/tmp/typefuzz_${worker_id}.out" "/tmp/typefuzz_${worker_id}.err"
-  return $exit_code
+  return 0  # Always return success to continue fuzzing
 }
 
 # Main execution
@@ -288,6 +292,30 @@ for i in $(seq 0 $((num_tests - 1))); do
   fi
 done
 
+# Check if test should be skipped (thread-safe)
+is_test_skipped() {
+  local test_name="$1"
+  (
+    flock -x 202
+    if [[ -f "$SKIP_TESTS_FILE" ]]; then
+      grep -Fxq "$test_name" "$SKIP_TESTS_FILE" 2>/dev/null && return 0
+    fi
+    return 1
+  ) 202>"$SKIP_TESTS_LOCK"
+}
+
+# Mark test as skipped (thread-safe)
+mark_test_as_skipped() {
+  local test_name="$1"
+  (
+    flock -x 202
+    # Check if already in file to avoid duplicates
+    if [[ ! -f "$SKIP_TESTS_FILE" ]] || ! grep -Fxq "$test_name" "$SKIP_TESTS_FILE" 2>/dev/null; then
+      echo "$test_name" >> "$SKIP_TESTS_FILE"
+    fi
+  ) 202>"$SKIP_TESTS_LOCK"
+}
+
 # Worker process - iterates over all tests repeatedly
 worker_process() {
   local worker_id="$1"
@@ -303,15 +331,14 @@ worker_process() {
         continue
       fi
       
-      # Run fuzzer on this test
-      run_test_worker "$test_name" "$worker_id"
-      local exit_code=$?
-      
-      # If exit code 3, skip and continue to next test
-      if [[ $exit_code -eq 3 ]]; then
-        echo "[WORKER $worker_id] Skipping $test_name (exit code 3), moving to next"
+      # Skip tests that returned exit code 3
+      if is_test_skipped "$test_name"; then
         continue
       fi
+      
+      # Run fuzzer on this test (continue even if it fails)
+      run_test_worker "$test_name" "$worker_id" || true
+      # All exit codes are handled inside run_test_worker, it always returns 0
     done
     # After processing all tests, start over
     echo "[WORKER $worker_id] Completed one full pass, starting over..."
@@ -384,4 +411,4 @@ output_bug_summary "FINAL BUG SUMMARY"
 echo "Versions: z3-new=$Z3_NEW, z3-old=$Z3_OLD_PATH, cvc5=$CVC5_PATH, cvc4=$CVC4_PATH"
 
 # Clean up temp files
-rm -f "$FIVE_MIN_WARNING_FILE"
+rm -f "$FIVE_MIN_WARNING_FILE" "$SKIP_TESTS_FILE" "$SKIP_TESTS_LOCK"
