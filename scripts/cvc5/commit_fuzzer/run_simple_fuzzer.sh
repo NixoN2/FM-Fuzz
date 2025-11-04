@@ -221,6 +221,9 @@ run_test_worker() {
   local per_test_timeout=86400  # 24 hours
   local timeout_cmd="timeout -s 9 $per_test_timeout"
   
+  # Track start time
+  local start_time=$(date +%s)
+  
   set +e
   $timeout_cmd typefuzz \
     -i "$ITERATIONS" \
@@ -231,6 +234,10 @@ run_test_worker() {
     "$test_path" > "/tmp/typefuzz_${worker_id}.out" 2> "/tmp/typefuzz_${worker_id}.err"
   local exit_code=$?
   set -e
+  
+  # Calculate runtime
+  local end_time=$(date +%s)
+  local runtime=$((end_time - start_time))
   
   # Handle exit code 3 - mark test as skipped and continue
   if [[ $exit_code -eq 3 ]]; then
@@ -280,13 +287,26 @@ run_test_worker() {
   fi
   
   if [[ $exit_code -ne 0 ]]; then
-    echo "[WORKER $worker_id] typefuzz exited with code $exit_code on $test_name"
+    echo "[WORKER $worker_id] typefuzz exited with code $exit_code on $test_name (runtime: ${runtime}s)"
     if [[ -s "/tmp/typefuzz_${worker_id}.err" ]]; then
       echo "[WORKER $worker_id] Error output:"
       head -10 "/tmp/typefuzz_${worker_id}.err" | sed 's/^/  /'
     fi
   else
-    echo "[WORKER $worker_id] No bugs found on $test_name"
+    # Exit code 0 - check if it actually ran or if something went wrong
+    if [[ $runtime -lt 5 ]]; then
+      echo "[WORKER $worker_id] ⚠ No bugs found on $test_name (runtime: ${runtime}s - very short, may indicate issue)"
+      if [[ -s "/tmp/typefuzz_${worker_id}.out" ]]; then
+        echo "[WORKER $worker_id] Output (first 10 lines):"
+        head -10 "/tmp/typefuzz_${worker_id}.out" | sed 's/^/  /'
+      fi
+      if [[ -s "/tmp/typefuzz_${worker_id}.err" ]]; then
+        echo "[WORKER $worker_id] Error output (first 10 lines):"
+        head -10 "/tmp/typefuzz_${worker_id}.err" | sed 's/^/  /'
+      fi
+    else
+      echo "[WORKER $worker_id] No bugs found on $test_name (runtime: ${runtime}s)"
+    fi
   fi
   
   rm -f "/tmp/typefuzz_${worker_id}.out" "/tmp/typefuzz_${worker_id}.err"
@@ -384,6 +404,13 @@ time_monitor() {
   while true; do
     sleep 30
     local remaining=$(get_time_remaining)
+    local elapsed=$((GITHUB_JOB_TIMEOUT - remaining))
+    local elapsed_min=$((elapsed / 60))
+    
+    # Debug: log time every 2 minutes
+    if [[ $((elapsed % 120)) -lt 30 ]]; then
+      echo "[TIME MONITOR] Elapsed: ${elapsed_min}m, Remaining: ${remaining}s ($(($remaining / 60))m)"
+    fi
     
     # Check if timeout reached - send SIGTERM to main process
     if [[ "$remaining" == "0" ]] || [[ $remaining -le 0 ]]; then
@@ -395,7 +422,7 @@ time_monitor() {
     if [[ ! -f "$FIVE_MIN_WARNING_FILE" ]] && is_5_minutes_left; then
       if [[ "$remaining" != "0" ]]; then
         local remaining_min=$((remaining / 60))
-        echo "⏰ WARNING: Only $remaining_min minute(s) remaining! Stopping workers and outputting bug summary..."
+        echo "⏰ WARNING: Elapsed ${elapsed_min}m, ${remaining_min} minute(s) remaining! Stopping workers and outputting bug summary..."
         touch "$FIVE_MIN_WARNING_FILE"
         
         # Stop all workers gracefully
