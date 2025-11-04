@@ -236,16 +236,33 @@ run_test_worker() {
   mkdir -p "$bugs_folder" "$scratch_folder" "$log_folder"
   
   local solver_clis="$Z3_NEW;$Z3_OLD_PATH;$CVC5_PATH;$CVC4_PATH"
-  local per_test_timeout=86400  # 24 hours
+  
+  # Calculate per-test timeout based on remaining job time
+  # Don't start a test if we're out of time
+  local remaining=0
+  if [[ $JOB_TIMEOUT -gt 0 ]]; then
+    remaining=$(get_time_remaining)
+    if [[ $remaining -le 0 ]]; then
+      echo "[WORKER $worker_id] ⏰ No time remaining, skipping $test_name" >&2
+      return 0
+    fi
+    # Use remaining time directly as timeout - this ensures we stop exactly when time runs out
+    local per_test_timeout=$remaining
+  else
+    local per_test_timeout=86400  # 24 hours if no job timeout
+    remaining="N/A"
+  fi
+  
   local timeout_cmd="timeout -s 9 $per_test_timeout"
   
   # Track start time
   local start_time=$(date +%s)
   
-  echo "[WORKER $worker_id] Running typefuzz with -i $ITERATIONS, timeout: ${per_test_timeout}s"
+  echo "[WORKER $worker_id] Running typefuzz with -i $ITERATIONS, timeout: ${per_test_timeout}s (remaining: ${remaining}s)"
   set +e
   $timeout_cmd typefuzz \
     -i "$ITERATIONS" \
+    --timeout 60 \
     --bugs "$bugs_folder" \
     --scratch "$scratch_folder" \
     --logfolder "$log_folder" \
@@ -452,6 +469,16 @@ worker_process() {
       # Skip tests that returned exit code 3
       if is_test_skipped "$test_name"; then
         continue
+      fi
+      
+      # Check time BEFORE starting test - if timeout reached, stop immediately
+      if [[ $JOB_TIMEOUT -gt 0 ]] && should_stop_early; then
+        local remaining=$(get_time_remaining)
+        local elapsed=$(( $(date +%s) - SCRIPT_START_TIME ))
+        echo "[WORKER $worker_id] ⏰ Time check before test: remaining=${remaining}s, elapsed=${elapsed}s - stopping!" >&2
+        should_stop=true
+        kill -TERM "$MAIN_PID" 2>/dev/null || true
+        break
       fi
       
       # Run fuzzer on this test (continue even if it fails)
