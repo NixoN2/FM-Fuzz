@@ -132,10 +132,31 @@ SKIP_TESTS_LOCK="/tmp/skip_tests_${JOB_ID:-$$}.lock"
 get_time_remaining() {
   if [[ $JOB_TIMEOUT -eq 0 ]]; then
     echo "999999999"
-    return
+    return 0
   fi
   
-  local current_time=$(date +%s)
+  # Ensure SCRIPT_START_TIME is set and valid
+  if [[ -z "${SCRIPT_START_TIME:-}" ]] || ! [[ "${SCRIPT_START_TIME}" =~ ^[0-9]+$ ]]; then
+    { echo "[DEBUG get_time_remaining] ERROR: Invalid SCRIPT_START_TIME=${SCRIPT_START_TIME:-unset}" >&2; } 2>/dev/null || true
+    echo "0"
+    return 1
+  fi
+  
+  # Ensure INITIAL_TIME_REMAINING is set and valid
+  if [[ -z "${INITIAL_TIME_REMAINING:-}" ]] || ! [[ "${INITIAL_TIME_REMAINING}" =~ ^[0-9]+$ ]]; then
+    { echo "[DEBUG get_time_remaining] ERROR: Invalid INITIAL_TIME_REMAINING=${INITIAL_TIME_REMAINING:-unset}" >&2; } 2>/dev/null || true
+    echo "0"
+    return 1
+  fi
+  
+  local current_time
+  current_time=$(date +%s 2>/dev/null || echo "0")
+  if ! [[ "$current_time" =~ ^[0-9]+$ ]] || [[ $current_time -eq 0 ]]; then
+    { echo "[DEBUG get_time_remaining] ERROR: Failed to get current time" >&2; } 2>/dev/null || true
+    echo "0"
+    return 1
+  fi
+  
   local elapsed=$((current_time - SCRIPT_START_TIME))
   local remaining=$((INITIAL_TIME_REMAINING - elapsed))
   
@@ -144,6 +165,7 @@ get_time_remaining() {
   else
     echo "$remaining"
   fi
+  return 0
 }
 
 # Check if we should stop - stop when time remaining reaches 0
@@ -152,12 +174,22 @@ should_stop_early() {
     return 1  # No timeout, don't stop
   fi
   local remaining
-  remaining=$(get_time_remaining 2>&1 || echo "0")
+  # Get remaining time, ensuring we only get numeric output
+  remaining=$(get_time_remaining 2>/dev/null | head -1 | tr -d '\n\r ' || echo "0")
+  # Validate it's a number
+  if ! [[ "$remaining" =~ ^[0-9]+$ ]]; then
+    { echo "[DEBUG should_stop_early] WARNING: Invalid remaining value '${remaining}', treating as 0" >&2; } 2>/dev/null || true
+    remaining="0"
+  fi
   local elapsed=$(( $(date +%s) - SCRIPT_START_TIME ))
   # Stop when time remaining reaches 0
   if [[ "$remaining" == "0" ]] || [[ $remaining -le 0 ]]; then
     { echo "[DEBUG should_stop_early] TRUE: elapsed=${elapsed}s, remaining=${remaining}s, INITIAL=${INITIAL_TIME_REMAINING}s" >&2; } 2>/dev/null || true
     return 0
+  fi
+  # Debug: log when we're NOT stopping (only occasionally to avoid spam)
+  if [[ $((elapsed % 60)) -eq 0 ]]; then
+    { echo "[DEBUG should_stop_early] FALSE: elapsed=${elapsed}s, remaining=${remaining}s" >&2; } 2>/dev/null || true
   fi
   return 1
 }
@@ -166,7 +198,12 @@ should_stop_early() {
 handle_timeout() {
   echo ""
   echo "⏰ Timeout reached. Shutting down gracefully..."
-  echo "[DEBUG handle_timeout] Called from signal handler. JOB_TIMEOUT=$JOB_TIMEOUT, remaining=$(get_time_remaining)s" >&2
+  local timeout_remaining
+  timeout_remaining=$(get_time_remaining 2>/dev/null | head -1 | tr -d '\n\r ' || echo "0")
+  if ! [[ "$timeout_remaining" =~ ^[0-9]+$ ]]; then
+    timeout_remaining="0"
+  fi
+  echo "[DEBUG handle_timeout] Called from signal handler. JOB_TIMEOUT=$JOB_TIMEOUT, remaining=${timeout_remaining}s" >&2
   # Kill all workers
   for pid in "${worker_pids[@]}"; do
     kill "$pid" 2>/dev/null || true
@@ -249,7 +286,12 @@ run_test_worker() {
   # Don't start a test if we're out of time
   local remaining=0
   if [[ $JOB_TIMEOUT -gt 0 ]]; then
-    remaining=$(get_time_remaining 2>&1 || echo "0")
+    remaining=$(get_time_remaining 2>/dev/null | head -1 | tr -d '\n\r ' || echo "")
+    # If we can't get a valid remaining time, log error and use a conservative default
+    if ! [[ "$remaining" =~ ^[0-9]+$ ]]; then
+      { echo "[WORKER $worker_id] ⚠️  WARNING: Failed to get valid remaining time for test timeout (got '${remaining}'), using conservative 60s timeout" >&2; } 2>/dev/null || true
+      remaining="60"  # Use 60 seconds as a conservative default
+    fi
     if [[ $remaining -le 0 ]]; then
       { echo "[WORKER $worker_id] ⏰ No time remaining, skipping $test_name" >&2; } 2>/dev/null || true
       return 0
@@ -270,7 +312,7 @@ run_test_worker() {
   set +e
   $timeout_cmd typefuzz \
     -i "$ITERATIONS" \
-    --timeout 60 \
+b   --timeout 15 \
     --bugs "$bugs_folder" \
     --scratch "$scratch_folder" \
     --logfolder "$log_folder" \
@@ -454,14 +496,23 @@ worker_process() {
     local current_time=$(date +%s)
     if [[ $((current_time - last_time_check)) -ge 30 ]]; then
       last_time_check=$current_time
-      if [[ $JOB_TIMEOUT -gt 0 ]] && should_stop_early; then
+      if [[ $JOB_TIMEOUT -gt 0 ]]; then
+        # Double-check before sending SIGTERM - get remaining time directly
         local remaining
-        remaining=$(get_time_remaining 2>&1 || echo "0")
+        remaining=$(get_time_remaining 2>/dev/null | head -1 | tr -d '\n\r ' || echo "")
+        # If we can't get a valid remaining time, don't stop - log error instead
+        if ! [[ "$remaining" =~ ^[0-9]+$ ]]; then
+          { echo "[WORKER $worker_id] ⚠️  WARNING: Failed to get valid remaining time (got '${remaining}'), continuing..." >&2; } 2>/dev/null || true
+          continue
+        fi
         local elapsed=$((current_time - SCRIPT_START_TIME))
-        { echo "[WORKER $worker_id] ⏰ Time check: remaining=${remaining}s, elapsed=${elapsed}s - stopping!" >&2; } 2>/dev/null || true
-        should_stop=true
-        kill -TERM "$MAIN_PID" 2>/dev/null || true
-        break
+        # Only stop if remaining is actually <= 0 (not just undefined)
+        if [[ $remaining -le 0 ]]; then
+          { echo "[WORKER $worker_id] ⏰ Time check: remaining=${remaining}s, elapsed=${elapsed}s, INITIAL=${INITIAL_TIME_REMAINING}s - stopping!" >&2; } 2>/dev/null || true
+          should_stop=true
+          kill -TERM "$MAIN_PID" 2>/dev/null || true
+          break
+        fi
       fi
     fi
     
@@ -483,10 +534,15 @@ worker_process() {
       # Check time BEFORE starting test - if timeout reached, stop immediately
       if [[ $JOB_TIMEOUT -gt 0 ]]; then
         local remaining_before
-        remaining_before=$(get_time_remaining 2>&1 || echo "0")
+        remaining_before=$(get_time_remaining 2>/dev/null | head -1 | tr -d '\n\r ' || echo "")
+        # If we can't get a valid remaining time, don't stop - log error instead
+        if ! [[ "$remaining_before" =~ ^[0-9]+$ ]]; then
+          { echo "[WORKER $worker_id] ⚠️  WARNING: Failed to get valid remaining time before test (got '${remaining_before}'), continuing..." >&2; } 2>/dev/null || true
+          continue
+        fi
         local elapsed_before=$(( $(date +%s) - SCRIPT_START_TIME ))
         if [[ $remaining_before -le 0 ]]; then
-          { echo "[WORKER $worker_id] ⏰ Time check before test: remaining=${remaining_before}s, elapsed=${elapsed_before}s - stopping!" >&2; } 2>/dev/null || true
+          { echo "[WORKER $worker_id] ⏰ Time check before test: remaining=${remaining_before}s, elapsed=${elapsed_before}s, INITIAL=${INITIAL_TIME_REMAINING}s - stopping!" >&2; } 2>/dev/null || true
           should_stop=true
           kill -TERM "$MAIN_PID" 2>/dev/null || true
           break
@@ -498,14 +554,22 @@ worker_process() {
       # All exit codes are handled inside run_test_worker, it always returns 0
       
       # Check time after each test (ensures we check even if tests are long)
-      if [[ $JOB_TIMEOUT -gt 0 ]] && should_stop_early; then
+      if [[ $JOB_TIMEOUT -gt 0 ]]; then
+        # Double-check before sending SIGTERM - get remaining time directly
         local remaining
-        remaining=$(get_time_remaining 2>&1 || echo "0")
+        remaining=$(get_time_remaining 2>/dev/null | head -1 | tr -d '\n\r ' || echo "")
+        # If we can't get a valid remaining time, don't stop - log error instead
+        if ! [[ "$remaining" =~ ^[0-9]+$ ]]; then
+          { echo "[WORKER $worker_id] ⚠️  WARNING: Failed to get valid remaining time after test (got '${remaining}'), continuing..." >&2; } 2>/dev/null || true
+          continue
+        fi
         local elapsed=$(( $(date +%s) - SCRIPT_START_TIME ))
-        { echo "[WORKER $worker_id] ⏰ Time check after test: remaining=${remaining}s, elapsed=${elapsed}s - stopping!" >&2; } 2>/dev/null || true
-        should_stop=true
-        kill -TERM "$MAIN_PID" 2>/dev/null || true
-        break
+        if [[ $remaining -le 0 ]]; then
+          { echo "[WORKER $worker_id] ⏰ Time check after test: remaining=${remaining}s, elapsed=${elapsed}s, INITIAL=${INITIAL_TIME_REMAINING}s - stopping!" >&2; } 2>/dev/null || true
+          should_stop=true
+          kill -TERM "$MAIN_PID" 2>/dev/null || true
+          break
+        fi
       fi
     done
     
