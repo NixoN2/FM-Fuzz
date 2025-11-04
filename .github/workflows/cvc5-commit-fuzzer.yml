@@ -125,7 +125,7 @@ jobs:
     
     steps:
       - name: Record job start time
-        run: echo "$(date +%s)" > ${{ github.workspace }}/job_start.txt
+        run: echo "$(date +%s)" > /tmp/job_start_${GITHUB_RUN_ID}_${{ matrix.job_id }}.txt
       
       - name: Checkout
         uses: actions/checkout@v5
@@ -176,7 +176,7 @@ jobs:
 
       - name: Calculate remaining time for fuzzing
         run: |
-          JOB_START=$(cat ${{ github.workspace }}/job_start.txt)
+          JOB_START=$(cat /tmp/job_start_${GITHUB_RUN_ID}_${{ matrix.job_id }}.txt)
           ELAPSED=$(($(date +%s) - JOB_START))
           GITHUB_TIMEOUT=21600  # 6 hours (GitHub default)
           STOP_BUFFER=21000  # 5h50m for testing (change to 300 for production = 5min)
