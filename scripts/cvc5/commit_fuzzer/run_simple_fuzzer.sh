@@ -312,7 +312,7 @@ run_test_worker() {
   set +e
   $timeout_cmd typefuzz \
     -i "$ITERATIONS" \
-b   --timeout 15 \
+    --timeout 15 \
     --bugs "$bugs_folder" \
     --scratch "$scratch_folder" \
     --logfolder "$log_folder" \
