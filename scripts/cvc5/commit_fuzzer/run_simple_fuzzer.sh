@@ -309,12 +309,16 @@ run_test_worker() {
   if [[ $exit_code -ne 0 ]]; then
     echo "[WORKER $worker_id] typefuzz exited with code $exit_code on $test_name (runtime: ${runtime}s)"
     if [[ -s "/tmp/typefuzz_${worker_id}.err" ]]; then
-      echo "[WORKER $worker_id] Error output:"
-      head -20 "/tmp/typefuzz_${worker_id}.err" | sed 's/^/  /'
+      echo "[WORKER $worker_id] Error output (ALL lines):"
+      cat "/tmp/typefuzz_${worker_id}.err" | sed 's/^/  /'
+    else
+      echo "[WORKER $worker_id] typefuzz stderr file is empty or missing"
     fi
     if [[ -s "/tmp/typefuzz_${worker_id}.out" ]]; then
-      echo "[WORKER $worker_id] Output (last 20 lines):"
-      tail -20 "/tmp/typefuzz_${worker_id}.out" | sed 's/^/  /'
+      echo "[WORKER $worker_id] Output (ALL lines):"
+      cat "/tmp/typefuzz_${worker_id}.out" | sed 's/^/  /'
+    else
+      echo "[WORKER $worker_id] typefuzz output file is empty or missing"
     fi
   else
     # Exit code 0 - typefuzz completed successfully
@@ -332,14 +336,18 @@ run_test_worker() {
     else
       echo "[WORKER $worker_id] No bugs found on $test_name (runtime: ${runtime}s)"
       echo "[WORKER $worker_id] DEBUG: ITERATIONS=$ITERATIONS, per_test_timeout=${per_test_timeout}s"
-      # Log why typefuzz exited - check if it completed all iterations or hit some limit
+      # Log why typefuzz exited - output ALL lines to identify the issue
       if [[ -s "/tmp/typefuzz_${worker_id}.out" ]]; then
-        echo "[WORKER $worker_id] typefuzz output (last 15 lines):"
-        tail -15 "/tmp/typefuzz_${worker_id}.out" | sed 's/^/  /'
+        echo "[WORKER $worker_id] typefuzz output (ALL lines):"
+        cat "/tmp/typefuzz_${worker_id}.out" | sed 's/^/  /'
+      else
+        echo "[WORKER $worker_id] typefuzz output file is empty or missing"
       fi
       if [[ -s "/tmp/typefuzz_${worker_id}.err" ]]; then
-        echo "[WORKER $worker_id] typefuzz stderr (last 15 lines):"
-        tail -15 "/tmp/typefuzz_${worker_id}.err" | sed 's/^/  /'
+        echo "[WORKER $worker_id] typefuzz stderr (ALL lines):"
+        cat "/tmp/typefuzz_${worker_id}.err" | sed 's/^/  /'
+      else
+        echo "[WORKER $worker_id] typefuzz stderr file is empty or missing"
       fi
       echo "[WORKER $worker_id] Continuing to next test (will loop back to this test later)"
     fi
