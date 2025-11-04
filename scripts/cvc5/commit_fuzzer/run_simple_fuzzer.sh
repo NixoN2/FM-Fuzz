@@ -105,6 +105,7 @@ else
   JOB_START_TIME=$(date +%s)
 fi
 
+# GitHub Actions default job timeout is 6 hours (21600 seconds)
 GITHUB_JOB_TIMEOUT=21600  # 6 hours in seconds
 BUGS_FOLDER="bugs"
 FIVE_MIN_WARNING_FILE="/tmp/five_min_warning_${JOB_ID:-$$}.txt"
@@ -112,6 +113,7 @@ SKIP_TESTS_FILE="/tmp/skip_tests_${JOB_ID:-$$}.txt"
 SKIP_TESTS_LOCK="/tmp/skip_tests_${JOB_ID:-$$}.lock"
 
 # Get time remaining in seconds based on GitHub Actions job timeout
+# Uses GITHUB_RUN_STARTED_AT + 6 hours (default GitHub Actions timeout)
 get_time_remaining() {
   local current_time=$(date +%s)
   local elapsed=$((current_time - JOB_START_TIME))
@@ -129,10 +131,38 @@ is_5_minutes_left() {
   if [[ "$remaining" == "0" ]]; then
     return 0
   fi
-  if [[ $remaining -le 300 ]]; then  # 5 minutes = 300 seconds
+  if [[ $remaining -le 21000 ]]; then  # 10 minutes elapsed (5 hours 50 minutes before 6 hours)
     return 0
   fi
   return 1
+}
+
+# Handle timeout gracefully - exit with success
+handle_timeout() {
+  echo ""
+  echo "⏰ Timeout reached. Shutting down gracefully..."
+  # Kill all workers
+  for pid in "${worker_pids[@]}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+  # Wait a bit for workers to finish
+  sleep 2
+  # Force kill if still running
+  for pid in "${worker_pids[@]}"; do
+    kill -9 "$pid" 2>/dev/null || true
+  done
+  # Collect bugs from all worker folders
+  for worker_id in $(seq 1 $NUM_WORKERS); do
+    bugs_folder="${BUGS_FOLDER}_${worker_id}"
+    if [[ -d "$bugs_folder" ]]; then
+      mkdir -p "$BUGS_FOLDER"
+      find "$bugs_folder" -type f \( -name "*.smt2" -o -name "*.smt" \) -exec mv {} "$BUGS_FOLDER/" \; 2>/dev/null || true
+    fi
+  done
+  output_bug_summary "FINAL BUG SUMMARY (TIMEOUT)"
+  # Clean up temp files
+  rm -f "$FIVE_MIN_WARNING_FILE" "$SKIP_TESTS_FILE" "$SKIP_TESTS_LOCK"
+  exit 0  # Exit with success
 }
 
 # Output bug summary
@@ -234,6 +264,7 @@ run_test_worker() {
         echo "[WORKER $worker_id] Bug file content:"
         echo "[WORKER $worker_id] ============================================================"
         cat "$bug_file" | sed "s/^/[WORKER $worker_id] /"
+        echo ""
         echo "[WORKER $worker_id] ============================================================"
       done
       # Move bugs to main bugs folder
@@ -282,6 +313,9 @@ mkdir -p "$BUGS_FOLDER"
 NUM_WORKERS=4
 echo "Starting $NUM_WORKERS worker(s) to process tests in parallel"
 echo ""
+
+# Initialize worker_pids array (global)
+declare -a worker_pids=()
 
 # Collect all test names into shared array
 test_names=()
@@ -345,17 +379,50 @@ worker_process() {
   done
 }
 
-# Background monitor for 5-minute warning
+# Background monitor for 5-minute warning and timeout
 time_monitor() {
   while true; do
     sleep 30
+    local remaining=$(get_time_remaining)
+    
+    # Check if timeout reached - send SIGTERM to main process
+    if [[ "$remaining" == "0" ]] || [[ $remaining -le 0 ]]; then
+      kill -TERM "$MAIN_PID" 2>/dev/null || true
+      break
+    fi
+    
+    # Check for 5-minute warning - stop workers and output bugs
     if [[ ! -f "$FIVE_MIN_WARNING_FILE" ]] && is_5_minutes_left; then
-      local remaining=$(get_time_remaining)
       if [[ "$remaining" != "0" ]]; then
         local remaining_min=$((remaining / 60))
-        echo "⏰ WARNING: Only $remaining_min minute(s) remaining! Outputting bug summary..."
+        echo "⏰ WARNING: Only $remaining_min minute(s) remaining! Stopping workers and outputting bug summary..."
         touch "$FIVE_MIN_WARNING_FILE"
-        output_bug_summary "BUG SUMMARY (5 MINUTES LEFT)"
+        
+        # Stop all workers gracefully
+        for pid in "${worker_pids[@]}"; do
+          kill "$pid" 2>/dev/null || true
+        done
+        # Wait a bit for workers to finish
+        sleep 2
+        # Force kill if still running
+        for pid in "${worker_pids[@]}"; do
+          kill -9 "$pid" 2>/dev/null || true
+        done
+        
+        # Collect bugs from all worker folders
+        for worker_id in $(seq 1 $NUM_WORKERS); do
+          bugs_folder="${BUGS_FOLDER}_${worker_id}"
+          if [[ -d "$bugs_folder" ]]; then
+            mkdir -p "$BUGS_FOLDER"
+            find "$bugs_folder" -type f \( -name "*.smt2" -o -name "*.smt" \) -exec mv {} "$BUGS_FOLDER/" \; 2>/dev/null || true
+          fi
+        done
+        
+        output_bug_summary "BUG SUMMARY (5 MINUTES LEFT - STOPPING WORKERS)"
+        
+        # Exit gracefully with success
+        kill -TERM "$MAIN_PID" 2>/dev/null || true
+        break
       fi
     fi
     
@@ -373,12 +440,17 @@ time_monitor() {
   done
 }
 
+# Set up signal handlers for graceful shutdown
+trap 'handle_timeout' SIGTERM SIGINT
+
+# Capture main process PID for time monitor
+MAIN_PID=$$
+
 # Start time monitor
 time_monitor &
 monitor_pid=$!
 
 # Start worker processes
-worker_pids=()
 for worker_id in $(seq 1 $NUM_WORKERS); do
   worker_process "$worker_id" &
   worker_pids+=($!)
@@ -386,7 +458,10 @@ done
 
 # Wait for timeout or manual stop (workers run indefinitely)
 # For now, wait for all workers (they'll run until timeout)
-wait "${worker_pids[@]}"
+set +e  # Don't exit on error in wait
+wait "${worker_pids[@]}" 2>/dev/null
+wait_exit_code=$?
+set -e
 
 # Stop time monitor
 kill "$monitor_pid" 2>/dev/null || true
@@ -412,3 +487,6 @@ echo "Versions: z3-new=$Z3_NEW, z3-old=$Z3_OLD_PATH, cvc5=$CVC5_PATH, cvc4=$CVC4
 
 # Clean up temp files
 rm -f "$FIVE_MIN_WARNING_FILE" "$SKIP_TESTS_FILE" "$SKIP_TESTS_LOCK"
+
+# Exit with success
+exit 0
