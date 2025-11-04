@@ -5,6 +5,10 @@
 
 set -euo pipefail
 
+# Ignore SIGPIPE (broken pipe) errors - they occur when processes are terminated
+# and are harmless since the receiver is already dead
+trap '' PIPE
+
 show_usage() {
   cat <<USAGE
 Usage: $(basename "$0") --tests-json JSON [--job-id ID] [--tests-root PATH] [--timeout SECONDS] [--time-remaining SECONDS] [--iterations NUM] [--z3-old-path PATH] [--cvc4-path PATH] [--cvc5-path PATH]
@@ -147,9 +151,12 @@ should_stop_early() {
   if [[ $JOB_TIMEOUT -eq 0 ]]; then
     return 1  # No timeout, don't stop
   fi
-  local remaining=$(get_time_remaining)
+  local remaining
+  remaining=$(get_time_remaining 2>&1 || echo "0")
+  local elapsed=$(( $(date +%s) - SCRIPT_START_TIME ))
   # Stop when time remaining reaches 0
   if [[ "$remaining" == "0" ]] || [[ $remaining -le 0 ]]; then
+    { echo "[DEBUG should_stop_early] TRUE: elapsed=${elapsed}s, remaining=${remaining}s, INITIAL=${INITIAL_TIME_REMAINING}s" >&2; } 2>/dev/null || true
     return 0
   fi
   return 1
@@ -159,6 +166,7 @@ should_stop_early() {
 handle_timeout() {
   echo ""
   echo "⏰ Timeout reached. Shutting down gracefully..."
+  echo "[DEBUG handle_timeout] Called from signal handler. JOB_TIMEOUT=$JOB_TIMEOUT, remaining=$(get_time_remaining)s" >&2
   # Kill all workers
   for pid in "${worker_pids[@]}"; do
     kill "$pid" 2>/dev/null || true
@@ -241,9 +249,9 @@ run_test_worker() {
   # Don't start a test if we're out of time
   local remaining=0
   if [[ $JOB_TIMEOUT -gt 0 ]]; then
-    remaining=$(get_time_remaining)
+    remaining=$(get_time_remaining 2>&1 || echo "0")
     if [[ $remaining -le 0 ]]; then
-      echo "[WORKER $worker_id] ⏰ No time remaining, skipping $test_name" >&2
+      { echo "[WORKER $worker_id] ⏰ No time remaining, skipping $test_name" >&2; } 2>/dev/null || true
       return 0
     fi
     # Use remaining time directly as timeout - this ensures we stop exactly when time runs out
@@ -447,9 +455,10 @@ worker_process() {
     if [[ $((current_time - last_time_check)) -ge 30 ]]; then
       last_time_check=$current_time
       if [[ $JOB_TIMEOUT -gt 0 ]] && should_stop_early; then
-        local remaining=$(get_time_remaining)
+        local remaining
+        remaining=$(get_time_remaining 2>&1 || echo "0")
         local elapsed=$((current_time - SCRIPT_START_TIME))
-        echo "[WORKER $worker_id] ⏰ Time check: remaining=${remaining}s, elapsed=${elapsed}s - stopping!" >&2
+        { echo "[WORKER $worker_id] ⏰ Time check: remaining=${remaining}s, elapsed=${elapsed}s - stopping!" >&2; } 2>/dev/null || true
         should_stop=true
         kill -TERM "$MAIN_PID" 2>/dev/null || true
         break
@@ -472,13 +481,16 @@ worker_process() {
       fi
       
       # Check time BEFORE starting test - if timeout reached, stop immediately
-      if [[ $JOB_TIMEOUT -gt 0 ]] && should_stop_early; then
-        local remaining=$(get_time_remaining)
-        local elapsed=$(( $(date +%s) - SCRIPT_START_TIME ))
-        echo "[WORKER $worker_id] ⏰ Time check before test: remaining=${remaining}s, elapsed=${elapsed}s - stopping!" >&2
-        should_stop=true
-        kill -TERM "$MAIN_PID" 2>/dev/null || true
-        break
+      if [[ $JOB_TIMEOUT -gt 0 ]]; then
+        local remaining_before
+        remaining_before=$(get_time_remaining 2>&1 || echo "0")
+        local elapsed_before=$(( $(date +%s) - SCRIPT_START_TIME ))
+        if [[ $remaining_before -le 0 ]]; then
+          { echo "[WORKER $worker_id] ⏰ Time check before test: remaining=${remaining_before}s, elapsed=${elapsed_before}s - stopping!" >&2; } 2>/dev/null || true
+          should_stop=true
+          kill -TERM "$MAIN_PID" 2>/dev/null || true
+          break
+        fi
       fi
       
       # Run fuzzer on this test (continue even if it fails)
@@ -487,9 +499,10 @@ worker_process() {
       
       # Check time after each test (ensures we check even if tests are long)
       if [[ $JOB_TIMEOUT -gt 0 ]] && should_stop_early; then
-        local remaining=$(get_time_remaining)
+        local remaining
+        remaining=$(get_time_remaining 2>&1 || echo "0")
         local elapsed=$(( $(date +%s) - SCRIPT_START_TIME ))
-        echo "[WORKER $worker_id] ⏰ Time check after test: remaining=${remaining}s, elapsed=${elapsed}s - stopping!" >&2
+        { echo "[WORKER $worker_id] ⏰ Time check after test: remaining=${remaining}s, elapsed=${elapsed}s - stopping!" >&2; } 2>/dev/null || true
         should_stop=true
         kill -TERM "$MAIN_PID" 2>/dev/null || true
         break
