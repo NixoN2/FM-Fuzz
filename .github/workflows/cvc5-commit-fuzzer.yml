@@ -180,11 +180,14 @@ jobs:
           NOW=$(date +%s)
           ELAPSED=$((NOW - JOB_START))
           GITHUB_TIMEOUT=21600  # 6 hours (GitHub default)
-          STOP_BUFFER=21000  # 5h50m for testing (change to 300 for production = 5min)
-          TIME_REMAINING=$((GITHUB_TIMEOUT - ELAPSED - STOP_BUFFER))
+          STOP_BUFFER=19800  # 5h30m before GitHub timeout (for testing). For production use 300 (5min)
+          # Stop at: JOB_START + (GITHUB_TIMEOUT - STOP_BUFFER) = JOB_START + 1800s (30 minutes from start)
+          STOP_AT_TIME=$((GITHUB_TIMEOUT - STOP_BUFFER))  # 30 minutes from job start
+          TIME_REMAINING=$((STOP_AT_TIME - ELAPSED))
           [ $TIME_REMAINING -lt 0 ] && TIME_REMAINING=0
           echo "[DEBUG] JOB_START: $JOB_START, NOW: $NOW, ELAPSED: ${ELAPSED}s ($((ELAPSED / 60))m)"
-          echo "[DEBUG] GITHUB_TIMEOUT: ${GITHUB_TIMEOUT}s, STOP_BUFFER: ${STOP_BUFFER}s"
+          echo "[DEBUG] GITHUB_TIMEOUT: ${GITHUB_TIMEOUT}s, STOP_BUFFER: ${STOP_BUFFER}s (5h30m before timeout)"
+          echo "[DEBUG] Will stop at ${STOP_AT_TIME}s ($((STOP_AT_TIME / 60))m) from job start"
           echo "[DEBUG] TIME_REMAINING: ${TIME_REMAINING}s ($((TIME_REMAINING / 60))m)"
           echo "TIME_REMAINING=$TIME_REMAINING" >> $GITHUB_ENV
 
