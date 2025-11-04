@@ -106,10 +106,18 @@ SCRIPT_START_TIME=$(date +%s)
 if [[ -n "$TIME_REMAINING" ]] && [[ "$TIME_REMAINING" =~ ^[0-9]+$ ]]; then
   INITIAL_TIME_REMAINING=$TIME_REMAINING
   JOB_TIMEOUT=$TIME_REMAINING
+  echo "[DEBUG] Using TIME_REMAINING from workflow: $TIME_REMAINING seconds ($((TIME_REMAINING / 60)) minutes)"
+  if [[ $TIME_REMAINING -eq 0 ]]; then
+    echo "⚠️  WARNING: TIME_REMAINING is 0! Setup took too long or calculation error."
+    echo "⚠️  This means: GITHUB_TIMEOUT - ELAPSED - STOP_BUFFER <= 0"
+    echo "⚠️  Will check once and exit if still 0"
+  fi
 else
   JOB_TIMEOUT=$TIMEOUT_SECONDS
   INITIAL_TIME_REMAINING=$TIMEOUT_SECONDS
+  echo "[DEBUG] Using default TIMEOUT_SECONDS: $TIMEOUT_SECONDS seconds ($((TIMEOUT_SECONDS / 60)) minutes)"
 fi
+echo "[DEBUG] SCRIPT_START_TIME: $SCRIPT_START_TIME, JOB_TIMEOUT: $JOB_TIMEOUT, INITIAL_TIME_REMAINING: $INITIAL_TIME_REMAINING"
 
 BUGS_FOLDER="bugs"
 FIVE_MIN_WARNING_FILE="/tmp/five_min_warning_${JOB_ID:-$$}.txt"
@@ -117,35 +125,20 @@ SKIP_TESTS_FILE="/tmp/skip_tests_${JOB_ID:-$$}.txt"
 SKIP_TESTS_LOCK="/tmp/skip_tests_${JOB_ID:-$$}.lock"
 
 # Get time remaining in seconds
-# If TIME_REMAINING was provided, we count down from that value
-# Otherwise, we calculate from JOB_START_TIME and TIMEOUT_SECONDS
 get_time_remaining() {
   if [[ $JOB_TIMEOUT -eq 0 ]]; then
-    # No timeout - return a large number
     echo "999999999"
     return
   fi
   
-  if [[ -n "$TIME_REMAINING" ]] && [[ "$TIME_REMAINING" =~ ^[0-9]+$ ]]; then
-    # Use initial time remaining and count down based on script elapsed time
-    local current_time=$(date +%s)
-    local elapsed=$((current_time - SCRIPT_START_TIME))
-    local remaining=$((INITIAL_TIME_REMAINING - elapsed))
-    if [[ $remaining -lt 0 ]]; then
-      echo "0"
-    else
-      echo "$remaining"
-    fi
+  local current_time=$(date +%s)
+  local elapsed=$((current_time - SCRIPT_START_TIME))
+  local remaining=$((INITIAL_TIME_REMAINING - elapsed))
+  
+  if [[ $remaining -lt 0 ]]; then
+    echo "0"
   else
-    # Fall back to calculating from JOB_START_TIME
-    local current_time=$(date +%s)
-    local elapsed=$((current_time - SCRIPT_START_TIME))
-    local remaining=$((JOB_TIMEOUT - elapsed))
-    if [[ $remaining -lt 0 ]]; then
-      echo "0"
-    else
-      echo "$remaining"
-    fi
+    echo "$remaining"
   fi
 }
 
@@ -249,6 +242,7 @@ run_test_worker() {
   # Track start time
   local start_time=$(date +%s)
   
+  echo "[WORKER $worker_id] Running typefuzz with -i $ITERATIONS, timeout: ${per_test_timeout}s"
   set +e
   $timeout_cmd typefuzz \
     -i "$ITERATIONS" \
@@ -259,6 +253,7 @@ run_test_worker() {
     "$test_path" > "/tmp/typefuzz_${worker_id}.out" 2> "/tmp/typefuzz_${worker_id}.err"
   local exit_code=$?
   set -e
+  echo "[WORKER $worker_id] typefuzz exited with code $exit_code"
   
   # Calculate runtime
   local end_time=$(date +%s)
@@ -336,16 +331,16 @@ run_test_worker() {
       fi
     else
       echo "[WORKER $worker_id] No bugs found on $test_name (runtime: ${runtime}s)"
+      echo "[WORKER $worker_id] DEBUG: ITERATIONS=$ITERATIONS, per_test_timeout=${per_test_timeout}s"
       # Log why typefuzz exited - check if it completed all iterations or hit some limit
       if [[ -s "/tmp/typefuzz_${worker_id}.out" ]]; then
-        echo "[WORKER $worker_id] typefuzz output (last 10 lines):"
-        tail -10 "/tmp/typefuzz_${worker_id}.out" | sed 's/^/  /'
+        echo "[WORKER $worker_id] typefuzz output (last 15 lines):"
+        tail -15 "/tmp/typefuzz_${worker_id}.out" | sed 's/^/  /'
       fi
       if [[ -s "/tmp/typefuzz_${worker_id}.err" ]]; then
-        echo "[WORKER $worker_id] typefuzz stderr (last 10 lines):"
-        tail -10 "/tmp/typefuzz_${worker_id}.err" | sed 's/^/  /'
+        echo "[WORKER $worker_id] typefuzz stderr (last 15 lines):"
+        tail -15 "/tmp/typefuzz_${worker_id}.err" | sed 's/^/  /'
       fi
-      # Note: typefuzz exited successfully after ${runtime}s. It will be retried in the next loop iteration.
       echo "[WORKER $worker_id] Continuing to next test (will loop back to this test later)"
     fi
   fi
@@ -415,12 +410,32 @@ mark_test_as_skipped() {
 worker_process() {
   local worker_id="$1"
   local total_tests=${#test_names[@]}
+  local last_time_check=$(date +%s)
+  local should_stop=false
   
   echo "[WORKER $worker_id] Started"
   
   # Loop through all tests repeatedly
   while true; do
+    # Check time every 30 seconds (workers run this check, so they'll always get CPU time)
+    local current_time=$(date +%s)
+    if [[ $((current_time - last_time_check)) -ge 30 ]]; then
+      last_time_check=$current_time
+      if [[ $JOB_TIMEOUT -gt 0 ]] && should_stop_early; then
+        local remaining=$(get_time_remaining)
+        local elapsed=$((current_time - SCRIPT_START_TIME))
+        echo "[WORKER $worker_id] ⏰ Time check: remaining=${remaining}s, elapsed=${elapsed}s - stopping!" >&2
+        should_stop=true
+        kill -TERM "$MAIN_PID" 2>/dev/null || true
+        break
+      fi
+    fi
+    
     for test_idx in $(seq 0 $((total_tests - 1))); do
+      if $should_stop; then
+        break
+      fi
+      
       local test_name="${test_names[$test_idx]}"
       if [[ -z "$test_name" ]]; then
         continue
@@ -434,103 +449,33 @@ worker_process() {
       # Run fuzzer on this test (continue even if it fails)
       run_test_worker "$test_name" "$worker_id" || true
       # All exit codes are handled inside run_test_worker, it always returns 0
-    done
-    # After processing all tests, start over
-    echo "[WORKER $worker_id] Completed one full pass, starting over..."
-  done
-}
-
-# Background monitor for early stop warning and timeout
-time_monitor() {
-  while true; do
-    sleep 30
-    local remaining=$(get_time_remaining)
-    local elapsed=0
-    if [[ $JOB_TIMEOUT -gt 0 ]]; then
-      elapsed=$(( $(date +%s) - SCRIPT_START_TIME ))
-    else
-      elapsed=$(( $(date +%s) - SCRIPT_START_TIME ))
-    fi
-    local elapsed_min=$((elapsed / 60))
-    
-    # Debug: log time every 2 minutes
-    if [[ $((elapsed % 120)) -lt 30 ]]; then
-      if [[ $JOB_TIMEOUT -gt 0 ]]; then
-        echo "[TIME MONITOR] Elapsed: ${elapsed_min}m, Remaining: ${remaining}s ($(($remaining / 60))m)"
-      else
-        echo "[TIME MONITOR] Elapsed: ${elapsed_min}m (no timeout)"
-      fi
-    fi
-    
-    # Check if timeout reached - send SIGTERM to main process
-    if [[ $JOB_TIMEOUT -gt 0 ]]; then
-      if [[ "$remaining" == "0" ]] || [[ $remaining -le 0 ]]; then
-        echo "⏰ Timeout reached (${JOB_TIMEOUT}s)! Stopping workers..."
+      
+      # Check time after each test (ensures we check even if tests are long)
+      if [[ $JOB_TIMEOUT -gt 0 ]] && should_stop_early; then
+        local remaining=$(get_time_remaining)
+        local elapsed=$(( $(date +%s) - SCRIPT_START_TIME ))
+        echo "[WORKER $worker_id] ⏰ Time check after test: remaining=${remaining}s, elapsed=${elapsed}s - stopping!" >&2
+        should_stop=true
         kill -TERM "$MAIN_PID" 2>/dev/null || true
         break
       fi
-    fi
-    
-    # Check for stop condition - stop workers and output bugs when time reaches 0
-    if [[ ! -f "$FIVE_MIN_WARNING_FILE" ]] && should_stop_early; then
-      if [[ $JOB_TIMEOUT -gt 0 ]]; then
-        local remaining_min=$((remaining / 60))
-        echo "⏰ Time remaining reached 0! Elapsed ${elapsed_min}m. Stopping workers and outputting bug summary..."
-      else
-        echo "⏰ WARNING: Elapsed ${elapsed_min}m! Stopping workers and outputting bug summary..."
-      fi
-      touch "$FIVE_MIN_WARNING_FILE"
-      
-      # Stop all workers gracefully
-      for pid in "${worker_pids[@]}"; do
-        kill "$pid" 2>/dev/null || true
-      done
-      # Wait a bit for workers to finish
-      sleep 2
-      # Force kill if still running
-      for pid in "${worker_pids[@]}"; do
-        kill -9 "$pid" 2>/dev/null || true
-      done
-      
-      # Collect bugs from all worker folders
-      for worker_id in $(seq 1 $NUM_WORKERS); do
-        bugs_folder="${BUGS_FOLDER}_${worker_id}"
-        if [[ -d "$bugs_folder" ]]; then
-          mkdir -p "$BUGS_FOLDER"
-          find "$bugs_folder" -type f \( -name "*.smt2" -o -name "*.smt" \) -exec mv {} "$BUGS_FOLDER/" \; 2>/dev/null || true
-        fi
-      done
-      
-      output_bug_summary "BUG SUMMARY (TIME REMAINING REACHED 0 - STOPPING WORKERS)"
-      
-      # Exit gracefully with success
-      kill -TERM "$MAIN_PID" 2>/dev/null || true
-      break
-    fi
-    
-    # Check if all workers are done
-    local all_done=true
-    for pid in "${worker_pids[@]}"; do
-      if kill -0 "$pid" 2>/dev/null; then
-        all_done=false
-        break
-      fi
     done
-    if $all_done; then
+    
+    if $should_stop; then
       break
     fi
+    
+    # After processing all tests, start over
+    echo "[WORKER $worker_id] Completed one full pass, starting over..."
   done
 }
 
 # Set up signal handlers for graceful shutdown
 trap 'handle_timeout' SIGTERM SIGINT
 
-# Capture main process PID for time monitor
+# Capture main process PID (workers use this to signal when timeout is reached)
 MAIN_PID=$$
-
-# Start time monitor
-time_monitor &
-monitor_pid=$!
+echo "[DEBUG] Main process PID: $MAIN_PID (workers will check time and signal this process when timeout reached)"
 
 # Start worker processes
 for worker_id in $(seq 1 $NUM_WORKERS); do
@@ -538,16 +483,11 @@ for worker_id in $(seq 1 $NUM_WORKERS); do
   worker_pids+=($!)
 done
 
-# Wait for timeout or manual stop (workers run indefinitely)
-# For now, wait for all workers (they'll run until timeout)
+# Wait for workers (they'll check time themselves and signal when timeout is reached)
 set +e  # Don't exit on error in wait
 wait "${worker_pids[@]}" 2>/dev/null
 wait_exit_code=$?
 set -e
-
-# Stop time monitor
-kill "$monitor_pid" 2>/dev/null || true
-wait "$monitor_pid" 2>/dev/null || true
 
 # Collect bugs from all worker folders
 for worker_id in $(seq 1 $NUM_WORKERS); do

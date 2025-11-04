@@ -177,11 +177,15 @@ jobs:
       - name: Calculate remaining time for fuzzing
         run: |
           JOB_START=$(cat /tmp/job_start_${GITHUB_RUN_ID}_${{ matrix.job_id }}.txt)
-          ELAPSED=$(($(date +%s) - JOB_START))
+          NOW=$(date +%s)
+          ELAPSED=$((NOW - JOB_START))
           GITHUB_TIMEOUT=21600  # 6 hours (GitHub default)
           STOP_BUFFER=21000  # 5h50m for testing (change to 300 for production = 5min)
           TIME_REMAINING=$((GITHUB_TIMEOUT - ELAPSED - STOP_BUFFER))
           [ $TIME_REMAINING -lt 0 ] && TIME_REMAINING=0
+          echo "[DEBUG] JOB_START: $JOB_START, NOW: $NOW, ELAPSED: ${ELAPSED}s ($((ELAPSED / 60))m)"
+          echo "[DEBUG] GITHUB_TIMEOUT: ${GITHUB_TIMEOUT}s, STOP_BUFFER: ${STOP_BUFFER}s"
+          echo "[DEBUG] TIME_REMAINING: ${TIME_REMAINING}s ($((TIME_REMAINING / 60))m)"
           echo "TIME_REMAINING=$TIME_REMAINING" >> $GITHUB_ENV
 
       - name: Run Simple Fuzzer on assigned tests
