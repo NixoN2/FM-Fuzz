@@ -124,6 +124,9 @@ jobs:
       contents: read
     
     steps:
+      - name: Record job start time
+        run: echo "$(date +%s)" > ${{ github.workspace }}/job_start.txt
+      
       - name: Checkout
         uses: actions/checkout@v5
       
@@ -171,6 +174,16 @@ jobs:
           ${{ github.workspace }}/solvers/z3-4.8.7 --version
           z3 --version
 
+      - name: Calculate remaining time for fuzzing
+        run: |
+          JOB_START=$(cat ${{ github.workspace }}/job_start.txt)
+          ELAPSED=$(($(date +%s) - JOB_START))
+          GITHUB_TIMEOUT=21600  # 6 hours (GitHub default)
+          STOP_BUFFER=21000  # 5h50m for testing (change to 300 for production = 5min)
+          TIME_REMAINING=$((GITHUB_TIMEOUT - ELAPSED - STOP_BUFFER))
+          [ $TIME_REMAINING -lt 0 ] && TIME_REMAINING=0
+          echo "TIME_REMAINING=$TIME_REMAINING" >> $GITHUB_ENV
+
       - name: Run Simple Fuzzer on assigned tests
         working-directory: cvc5
         run: |
@@ -178,7 +191,7 @@ jobs:
             --tests-json '${{ toJson(matrix.tests) }}' \
             --job-id '${{ matrix.job_id }}' \
             --tests-root 'test/regress/cli' \
-            --timeout 21600 \
+            --time-remaining ${{ env.TIME_REMAINING }} \
             --iterations 2147483647 \
             --z3-old-path ${{ github.workspace }}/solvers/z3-4.8.7 \
             --cvc4-path ${{ github.workspace }}/solvers/cvc4-1.6 \

@@ -7,13 +7,15 @@ set -euo pipefail
 
 show_usage() {
   cat <<USAGE
-Usage: $(basename "$0") --tests-json JSON [--job-id ID] [--tests-root PATH] [--timeout SECONDS] [--iterations NUM] [--z3-old-path PATH] [--cvc4-path PATH] [--cvc5-path PATH]
+Usage: $(basename "$0") --tests-json JSON [--job-id ID] [--tests-root PATH] [--timeout SECONDS] [--time-remaining SECONDS] [--iterations NUM] [--z3-old-path PATH] [--cvc4-path PATH] [--cvc5-path PATH]
 
 Options:
   --tests-json JSON   JSON array of test names (relative to --tests-root). Required
   --job-id ID         Job identifier (optional, for logging)
   --tests-root PATH   Root dir for tests (default: test/regress/cli)
   --timeout SECONDS   Timeout per fuzzer process (default: 21600 = 6 hours, use 0 for no timeout)
+  --time-remaining SECONDS  Remaining time until job timeout (calculated by workflow). 
+                            Script will stop when 5 minutes remain. If not provided, uses --timeout.
   -i, --iterations NUM  Number of iterations per test (default: 2147483647)
   --z3-old-path PATH  Path to z3-4.8.7 binary (required)
   --cvc4-path PATH    Path to cvc4-1.6 binary (required)
@@ -26,6 +28,7 @@ TESTS_JSON=""
 JOB_ID=""
 TESTS_ROOT="test/regress/cli"
 TIMEOUT_SECONDS=21600  # 6 hours (6 * 60 * 60)
+TIME_REMAINING=""  # If set, overrides timeout calculation
 ITERATIONS=2147483647
 Z3_OLD_PATH=""
 CVC4_PATH=""
@@ -37,6 +40,7 @@ while [[ $# -gt 0 ]]; do
     --job-id) JOB_ID="$2"; shift 2 ;;
     --tests-root) TESTS_ROOT="$2"; shift 2 ;;
     --timeout) TIMEOUT_SECONDS="$2"; shift 2 ;;
+    --time-remaining) TIME_REMAINING="$2"; shift 2 ;;
     -i|--iterations) ITERATIONS="$2"; shift 2 ;;
     --z3-old-path) Z3_OLD_PATH="$2"; shift 2 ;;
     --cvc4-path) CVC4_PATH="$2"; shift 2 ;;
@@ -95,43 +99,64 @@ CVC4_PATH=$(realpath "$CVC4_PATH" 2>/dev/null || echo "$CVC4_PATH")
 CVC5_PATH=$(realpath "$CVC5_PATH" 2>/dev/null || echo "$CVC5_PATH")
 Z3_NEW="z3"
 
-# Get job start time - use GitHub Actions job start time if available
-if [[ -n "${GITHUB_RUN_STARTED_AT:-}" ]]; then
-  JOB_START_TIME=$(date -u -d "${GITHUB_RUN_STARTED_AT}" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "${GITHUB_RUN_STARTED_AT}" +%s 2>/dev/null || date +%s)
-  if [[ -z "$JOB_START_TIME" ]] || [[ ! "$JOB_START_TIME" =~ ^[0-9]+$ ]]; then
-    JOB_START_TIME=$(date +%s)
-  fi
+# Get script start time for tracking elapsed time
+SCRIPT_START_TIME=$(date +%s)
+
+# Use TIME_REMAINING from workflow (already has stop buffer subtracted) or fallback to TIMEOUT_SECONDS
+if [[ -n "$TIME_REMAINING" ]] && [[ "$TIME_REMAINING" =~ ^[0-9]+$ ]]; then
+  INITIAL_TIME_REMAINING=$TIME_REMAINING
+  JOB_TIMEOUT=$TIME_REMAINING
 else
-  JOB_START_TIME=$(date +%s)
+  JOB_TIMEOUT=$TIMEOUT_SECONDS
+  INITIAL_TIME_REMAINING=$TIMEOUT_SECONDS
 fi
 
-# GitHub Actions default job timeout is 6 hours (21600 seconds)
-GITHUB_JOB_TIMEOUT=21600  # 6 hours in seconds
 BUGS_FOLDER="bugs"
 FIVE_MIN_WARNING_FILE="/tmp/five_min_warning_${JOB_ID:-$$}.txt"
 SKIP_TESTS_FILE="/tmp/skip_tests_${JOB_ID:-$$}.txt"
 SKIP_TESTS_LOCK="/tmp/skip_tests_${JOB_ID:-$$}.lock"
 
-# Get time remaining in seconds based on GitHub Actions job timeout
-# Uses GITHUB_RUN_STARTED_AT + 6 hours (default GitHub Actions timeout)
+# Get time remaining in seconds
+# If TIME_REMAINING was provided, we count down from that value
+# Otherwise, we calculate from JOB_START_TIME and TIMEOUT_SECONDS
 get_time_remaining() {
-  local current_time=$(date +%s)
-  local elapsed=$((current_time - JOB_START_TIME))
-  local remaining=$((GITHUB_JOB_TIMEOUT - elapsed))
-  if [[ $remaining -lt 0 ]]; then
-    echo "0"
+  if [[ $JOB_TIMEOUT -eq 0 ]]; then
+    # No timeout - return a large number
+    echo "999999999"
+    return
+  fi
+  
+  if [[ -n "$TIME_REMAINING" ]] && [[ "$TIME_REMAINING" =~ ^[0-9]+$ ]]; then
+    # Use initial time remaining and count down based on script elapsed time
+    local current_time=$(date +%s)
+    local elapsed=$((current_time - SCRIPT_START_TIME))
+    local remaining=$((INITIAL_TIME_REMAINING - elapsed))
+    if [[ $remaining -lt 0 ]]; then
+      echo "0"
+    else
+      echo "$remaining"
+    fi
   else
-    echo "$remaining"
+    # Fall back to calculating from JOB_START_TIME
+    local current_time=$(date +%s)
+    local elapsed=$((current_time - SCRIPT_START_TIME))
+    local remaining=$((JOB_TIMEOUT - elapsed))
+    if [[ $remaining -lt 0 ]]; then
+      echo "0"
+    else
+      echo "$remaining"
+    fi
   fi
 }
 
-# Check if we're 5 minutes or less from GitHub Actions job timeout
-is_5_minutes_left() {
-  local remaining=$(get_time_remaining)
-  if [[ "$remaining" == "0" ]]; then
-    return 0
+# Check if we should stop - stop when time remaining reaches 0
+should_stop_early() {
+  if [[ $JOB_TIMEOUT -eq 0 ]]; then
+    return 1  # No timeout, don't stop
   fi
-  if [[ $remaining -le 21000 ]]; then  # 10 minutes elapsed (5 hours 50 minutes before 6 hours)
+  local remaining=$(get_time_remaining)
+  # Stop when time remaining reaches 0
+  if [[ "$remaining" == "0" ]] || [[ $remaining -le 0 ]]; then
     return 0
   fi
   return 1
@@ -290,10 +315,15 @@ run_test_worker() {
     echo "[WORKER $worker_id] typefuzz exited with code $exit_code on $test_name (runtime: ${runtime}s)"
     if [[ -s "/tmp/typefuzz_${worker_id}.err" ]]; then
       echo "[WORKER $worker_id] Error output:"
-      head -10 "/tmp/typefuzz_${worker_id}.err" | sed 's/^/  /'
+      head -20 "/tmp/typefuzz_${worker_id}.err" | sed 's/^/  /'
+    fi
+    if [[ -s "/tmp/typefuzz_${worker_id}.out" ]]; then
+      echo "[WORKER $worker_id] Output (last 20 lines):"
+      tail -20 "/tmp/typefuzz_${worker_id}.out" | sed 's/^/  /'
     fi
   else
-    # Exit code 0 - check if it actually ran or if something went wrong
+    # Exit code 0 - typefuzz completed successfully
+    # Check if it actually ran or if something went wrong
     if [[ $runtime -lt 5 ]]; then
       echo "[WORKER $worker_id] ⚠ No bugs found on $test_name (runtime: ${runtime}s - very short, may indicate issue)"
       if [[ -s "/tmp/typefuzz_${worker_id}.out" ]]; then
@@ -306,6 +336,17 @@ run_test_worker() {
       fi
     else
       echo "[WORKER $worker_id] No bugs found on $test_name (runtime: ${runtime}s)"
+      # Log why typefuzz exited - check if it completed all iterations or hit some limit
+      if [[ -s "/tmp/typefuzz_${worker_id}.out" ]]; then
+        echo "[WORKER $worker_id] typefuzz output (last 10 lines):"
+        tail -10 "/tmp/typefuzz_${worker_id}.out" | sed 's/^/  /'
+      fi
+      if [[ -s "/tmp/typefuzz_${worker_id}.err" ]]; then
+        echo "[WORKER $worker_id] typefuzz stderr (last 10 lines):"
+        tail -10 "/tmp/typefuzz_${worker_id}.err" | sed 's/^/  /'
+      fi
+      # Note: typefuzz exited successfully after ${runtime}s. It will be retried in the next loop iteration.
+      echo "[WORKER $worker_id] Continuing to next test (will loop back to this test later)"
     fi
   fi
   
@@ -322,7 +363,7 @@ fi
 
 echo "Running fuzzer on $num_tests test(s)${JOB_ID:+ for job $JOB_ID}"
 echo "Tests root: $TESTS_ROOT"
-echo "Timeout: ${TIMEOUT_SECONDS}s"
+echo "Timeout: ${JOB_TIMEOUT}s ($((JOB_TIMEOUT / 60)) minutes)"
 echo "Iterations per test: $ITERATIONS"
 echo "Solvers: z3-new=$Z3_NEW, z3-old=$Z3_OLD_PATH, cvc5=$CVC5_PATH, cvc4=$CVC4_PATH"
 echo ""
@@ -399,58 +440,72 @@ worker_process() {
   done
 }
 
-# Background monitor for 5-minute warning and timeout
+# Background monitor for early stop warning and timeout
 time_monitor() {
   while true; do
     sleep 30
     local remaining=$(get_time_remaining)
-    local elapsed=$((GITHUB_JOB_TIMEOUT - remaining))
+    local elapsed=0
+    if [[ $JOB_TIMEOUT -gt 0 ]]; then
+      elapsed=$(( $(date +%s) - SCRIPT_START_TIME ))
+    else
+      elapsed=$(( $(date +%s) - SCRIPT_START_TIME ))
+    fi
     local elapsed_min=$((elapsed / 60))
     
     # Debug: log time every 2 minutes
     if [[ $((elapsed % 120)) -lt 30 ]]; then
-      echo "[TIME MONITOR] Elapsed: ${elapsed_min}m, Remaining: ${remaining}s ($(($remaining / 60))m)"
+      if [[ $JOB_TIMEOUT -gt 0 ]]; then
+        echo "[TIME MONITOR] Elapsed: ${elapsed_min}m, Remaining: ${remaining}s ($(($remaining / 60))m)"
+      else
+        echo "[TIME MONITOR] Elapsed: ${elapsed_min}m (no timeout)"
+      fi
     fi
     
     # Check if timeout reached - send SIGTERM to main process
-    if [[ "$remaining" == "0" ]] || [[ $remaining -le 0 ]]; then
-      kill -TERM "$MAIN_PID" 2>/dev/null || true
-      break
-    fi
-    
-    # Check for 5-minute warning - stop workers and output bugs
-    if [[ ! -f "$FIVE_MIN_WARNING_FILE" ]] && is_5_minutes_left; then
-      if [[ "$remaining" != "0" ]]; then
-        local remaining_min=$((remaining / 60))
-        echo "⏰ WARNING: Elapsed ${elapsed_min}m, ${remaining_min} minute(s) remaining! Stopping workers and outputting bug summary..."
-        touch "$FIVE_MIN_WARNING_FILE"
-        
-        # Stop all workers gracefully
-        for pid in "${worker_pids[@]}"; do
-          kill "$pid" 2>/dev/null || true
-        done
-        # Wait a bit for workers to finish
-        sleep 2
-        # Force kill if still running
-        for pid in "${worker_pids[@]}"; do
-          kill -9 "$pid" 2>/dev/null || true
-        done
-        
-        # Collect bugs from all worker folders
-        for worker_id in $(seq 1 $NUM_WORKERS); do
-          bugs_folder="${BUGS_FOLDER}_${worker_id}"
-          if [[ -d "$bugs_folder" ]]; then
-            mkdir -p "$BUGS_FOLDER"
-            find "$bugs_folder" -type f \( -name "*.smt2" -o -name "*.smt" \) -exec mv {} "$BUGS_FOLDER/" \; 2>/dev/null || true
-          fi
-        done
-        
-        output_bug_summary "BUG SUMMARY (5 MINUTES LEFT - STOPPING WORKERS)"
-        
-        # Exit gracefully with success
+    if [[ $JOB_TIMEOUT -gt 0 ]]; then
+      if [[ "$remaining" == "0" ]] || [[ $remaining -le 0 ]]; then
+        echo "⏰ Timeout reached (${JOB_TIMEOUT}s)! Stopping workers..."
         kill -TERM "$MAIN_PID" 2>/dev/null || true
         break
       fi
+    fi
+    
+    # Check for stop condition - stop workers and output bugs when time reaches 0
+    if [[ ! -f "$FIVE_MIN_WARNING_FILE" ]] && should_stop_early; then
+      if [[ $JOB_TIMEOUT -gt 0 ]]; then
+        local remaining_min=$((remaining / 60))
+        echo "⏰ Time remaining reached 0! Elapsed ${elapsed_min}m. Stopping workers and outputting bug summary..."
+      else
+        echo "⏰ WARNING: Elapsed ${elapsed_min}m! Stopping workers and outputting bug summary..."
+      fi
+      touch "$FIVE_MIN_WARNING_FILE"
+      
+      # Stop all workers gracefully
+      for pid in "${worker_pids[@]}"; do
+        kill "$pid" 2>/dev/null || true
+      done
+      # Wait a bit for workers to finish
+      sleep 2
+      # Force kill if still running
+      for pid in "${worker_pids[@]}"; do
+        kill -9 "$pid" 2>/dev/null || true
+      done
+      
+      # Collect bugs from all worker folders
+      for worker_id in $(seq 1 $NUM_WORKERS); do
+        bugs_folder="${BUGS_FOLDER}_${worker_id}"
+        if [[ -d "$bugs_folder" ]]; then
+          mkdir -p "$BUGS_FOLDER"
+          find "$bugs_folder" -type f \( -name "*.smt2" -o -name "*.smt" \) -exec mv {} "$BUGS_FOLDER/" \; 2>/dev/null || true
+        fi
+      done
+      
+      output_bug_summary "BUG SUMMARY (TIME REMAINING REACHED 0 - STOPPING WORKERS)"
+      
+      # Exit gracefully with success
+      kill -TERM "$MAIN_PID" 2>/dev/null || true
+      break
     fi
     
     # Check if all workers are done
