@@ -164,17 +164,23 @@ class SimpleCommitFuzzer:
             pass
     
     def _handle_critical_resources(self, cpu_percent: List[float], max_cpu: float, memory_percent: float, memory_total: int, memory_used: int):
-        memory_total_gb = memory_total / (1024**3)
-        memory_used_gb = memory_used / (1024**3)
-        
-        issues = []
-        if max_cpu >= self.RESOURCE_CONFIG['cpu_critical']:
-            cpu_details = ", ".join([f"core{i+1}:{p:.1f}%" for i, p in enumerate(cpu_percent)])
-            issues.append(f"CPU: {max_cpu:.1f}% max ({cpu_details}, critical: {self.RESOURCE_CONFIG['cpu_critical']}%)")
-        if memory_percent >= self.RESOURCE_CONFIG['memory_critical']:
-            issues.append(f"Memory: {memory_percent:.1f}% ({memory_used_gb:.2f}GB / {memory_total_gb:.2f}GB, critical: {self.RESOURCE_CONFIG['memory_critical']}%)")
-        
-        print(f"[RESOURCE] Critical resource usage detected - {', '.join(issues)} - taking action", file=sys.stderr)
+        try:
+            memory_total_gb = memory_total / (1024**3)
+            memory_used_gb = memory_used / (1024**3)
+            
+            issues = []
+            if max_cpu >= self.RESOURCE_CONFIG['cpu_critical']:
+                cpu_details = ", ".join([f"core{i+1}:{p:.1f}%" for i, p in enumerate(cpu_percent)])
+                issues.append(f"CPU: {max_cpu:.1f}% max ({cpu_details}, critical: {self.RESOURCE_CONFIG['cpu_critical']}%)")
+            if memory_percent >= self.RESOURCE_CONFIG['memory_critical']:
+                issues.append(f"Memory: {memory_percent:.1f}% ({memory_used_gb:.2f}GB / {memory_total_gb:.2f}GB, critical: {self.RESOURCE_CONFIG['memory_critical']}%)")
+            
+            if issues:
+                print(f"[RESOURCE] Critical resource usage detected - {', '.join(issues)} - taking action", file=sys.stderr)
+            else:
+                print(f"[RESOURCE] Critical resource usage detected - CPU: {max_cpu:.1f}%, Memory: {memory_percent:.1f}% ({memory_used_gb:.2f}GB / {memory_total_gb:.2f}GB) - taking action", file=sys.stderr)
+        except Exception as e:
+            print(f"[RESOURCE] Critical resource usage detected - CPU: {max_cpu:.1f}%, Memory: {memory_percent:.1f}% - taking action (error formatting details: {e})", file=sys.stderr)
         
         with self.resource_lock:
             self.resource_state['paused'] = True
