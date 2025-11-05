@@ -77,9 +77,9 @@ class SimpleCommitFuzzer:
             self.time_remaining = None
             print("[DEBUG] No timeout set (running indefinitely)")
         
-        self.z3_new = "z3"
-        self.z3_old_path = Path(z3_old_path) if z3_old_path else None
-        self.cvc4_path = Path(cvc4_path) if cvc4_path else None
+        self.z3_new = "z3 model_validate=true"
+        # self.z3_old_path = Path(z3_old_path) if z3_old_path else None
+        # self.cvc4_path = Path(cvc4_path) if cvc4_path else None
         self.cvc5_path = Path(cvc5_path)
         
         self._validate_solvers()
@@ -107,12 +107,13 @@ class SimpleCommitFuzzer:
         })
     
     def _validate_solvers(self):
-        if not shutil.which(self.z3_new):
-            raise ValueError(f"z3 (new) not found in PATH")
-        if self.z3_old_path and not self.z3_old_path.exists():
-            raise ValueError(f"z3-old not found at: {self.z3_old_path}")
-        if self.cvc4_path and not self.cvc4_path.exists():
-            raise ValueError(f"cvc4 not found at: {self.cvc4_path}")
+        z3_binary = self.z3_new.split()[0]  # Extract just "z3" from "z3 model_validate=true"
+        if not shutil.which(z3_binary):
+            raise ValueError(f"z3 not found in PATH")
+        # if self.z3_old_path and not self.z3_old_path.exists():
+        #     raise ValueError(f"z3-old not found at: {self.z3_old_path}")
+        # if self.cvc4_path and not self.cvc4_path.exists():
+        #     raise ValueError(f"cvc4 not found at: {self.cvc4_path}")
         if not self.cvc5_path.exists():
             raise ValueError(f"cvc5 not found at: {self.cvc5_path}")
     
@@ -231,11 +232,11 @@ class SimpleCommitFuzzer:
     
     def _get_solver_clis(self) -> str:
         solvers = [self.z3_new]
-        if self.z3_old_path:
-            solvers.append(str(self.z3_old_path))
-        solvers.append(str(self.cvc5_path))
-        if self.cvc4_path:
-            solvers.append(str(self.cvc4_path))
+        # if self.z3_old_path:
+        #     solvers.append(str(self.z3_old_path))
+        solvers.append(f"{self.cvc5_path} --check-models --check-proofs --strings-exp")
+        # if self.cvc4_path:
+        #     solvers.append(str(self.cvc4_path))
         return ";".join(solvers)
     
     def _compute_time_remaining(self, job_start_time: float, stop_buffer_minutes: int) -> int:
@@ -438,7 +439,7 @@ class SimpleCommitFuzzer:
         print(f"Iterations per test: {self.iterations}")
         print(f"CPU cores: {self.cpu_count}")
         print(f"Workers: {self.num_workers}")
-        print(f"Solvers: z3-new={self.z3_new}, z3-old={self.z3_old_path}, cvc5={self.cvc5_path}, cvc4={self.cvc4_path}")
+        print(f"Solvers: z3={self.z3_new}, cvc5={self.cvc5_path} --check-models --check-proofs --strings-exp")
         print()
         
         for test in self.tests:
@@ -572,13 +573,13 @@ def main():
     )
     parser.add_argument(
         "--z3-old-path",
-        required=True,
-        help="Path to z3-4.8.7 binary",
+        required=False,
+        help="Path to z3-4.8.7 binary (not used, commented out)",
     )
     parser.add_argument(
         "--cvc4-path",
-        required=True,
-        help="Path to cvc4-1.6 binary",
+        required=False,
+        help="Path to cvc4-1.6 binary (not used, commented out)",
     )
     parser.add_argument(
         "--cvc5-path",
