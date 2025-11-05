@@ -49,10 +49,18 @@ class SimpleCommitFuzzer:
         self.tests = tests
         self.tests_root = Path(tests_root)
         self.bugs_folder = Path(bugs_folder)
-        self.num_workers = num_workers
         self.iterations = iterations
         self.job_id = job_id
         self.start_time = time.time()
+        
+        try:
+            self.cpu_count = psutil.cpu_count()
+        except Exception:
+            self.cpu_count = 4
+        
+        self.num_workers = min(num_workers, self.cpu_count) if num_workers > 0 else self.cpu_count
+        if num_workers > self.cpu_count:
+            print(f"[WARN] Requested {num_workers} workers but only {self.cpu_count} CPU cores available, using {self.num_workers} workers", file=sys.stderr)
         
         if job_start_time is not None:
             self.time_remaining = self._compute_time_remaining(job_start_time, stop_buffer_minutes)
@@ -81,12 +89,8 @@ class SimpleCommitFuzzer:
         self.bugs_lock = multiprocessing.Lock()
         self.shutdown_event = multiprocessing.Event()
         
-        try:
-            cpu_count = psutil.cpu_count()
-        except Exception:
-            cpu_count = 4
         self.resource_state = multiprocessing.Manager().dict({
-            'cpu_percent': [0.0] * cpu_count,
+            'cpu_percent': [0.0] * self.cpu_count,
             'memory_percent': 0.0,
             'status': 'normal',
             'paused': False,
@@ -135,9 +139,12 @@ class SimpleCommitFuzzer:
                         self.resource_state['memory_percent'] = memory_percent
                         self.resource_state['status'] = status
                         self.resource_state['last_update'] = time.time()
+                        self.resource_state['max_cpu'] = max_cpu
+                        self.resource_state['memory_total_gb'] = memory.total / (1024**3)
+                        self.resource_state['memory_used_gb'] = memory.used / (1024**3)
                     
                     if status == 'critical':
-                        self._handle_critical_resources()
+                        self._handle_critical_resources(cpu_percent, max_cpu, memory_percent, memory.total, memory.used)
                     elif status == 'warning':
                         self._handle_warning_resources()
                     
@@ -156,8 +163,18 @@ class SimpleCommitFuzzer:
         except Exception:
             pass
     
-    def _handle_critical_resources(self):
-        print(f"[RESOURCE] Critical resource usage detected - taking action", file=sys.stderr)
+    def _handle_critical_resources(self, cpu_percent: List[float], max_cpu: float, memory_percent: float, memory_total: int, memory_used: int):
+        memory_total_gb = memory_total / (1024**3)
+        memory_used_gb = memory_used / (1024**3)
+        
+        issues = []
+        if max_cpu >= self.RESOURCE_CONFIG['cpu_critical']:
+            cpu_details = ", ".join([f"core{i+1}:{p:.1f}%" for i, p in enumerate(cpu_percent)])
+            issues.append(f"CPU: {max_cpu:.1f}% max ({cpu_details}, critical: {self.RESOURCE_CONFIG['cpu_critical']}%)")
+        if memory_percent >= self.RESOURCE_CONFIG['memory_critical']:
+            issues.append(f"Memory: {memory_percent:.1f}% ({memory_used_gb:.2f}GB / {memory_total_gb:.2f}GB, critical: {self.RESOURCE_CONFIG['memory_critical']}%)")
+        
+        print(f"[RESOURCE] Critical resource usage detected - {', '.join(issues)} - taking action", file=sys.stderr)
         
         with self.resource_lock:
             self.resource_state['paused'] = True
@@ -410,6 +427,7 @@ class SimpleCommitFuzzer:
         print(f"Tests root: {self.tests_root}")
         print(f"Timeout: {self.time_remaining}s ({self.time_remaining // 60} minutes)" if self.time_remaining else "No timeout")
         print(f"Iterations per test: {self.iterations}")
+        print(f"CPU cores: {self.cpu_count}")
         print(f"Workers: {self.num_workers}")
         print(f"Solvers: z3-new={self.z3_new}, z3-old={self.z3_old_path}, cvc5={self.cvc5_path}, cvc4={self.cvc4_path}")
         print()
@@ -558,11 +576,16 @@ def main():
         default="./build/bin/cvc5",
         help="Path to cvc5 binary (default: ./build/bin/cvc5)",
     )
+    try:
+        default_workers = psutil.cpu_count()
+    except Exception:
+        default_workers = 4
+    
     parser.add_argument(
         "--workers",
         type=int,
-        default=4,
-        help="Number of worker processes (default: 4). Each worker runs typefuzz with 4 solvers, so 4 workers = ~16 concurrent solver processes",
+        default=default_workers,
+        help=f"Number of worker processes (default: {default_workers}, auto-detected from CPU cores). Each worker runs typefuzz with 4 solvers",
     )
     parser.add_argument(
         "--bugs-folder",
