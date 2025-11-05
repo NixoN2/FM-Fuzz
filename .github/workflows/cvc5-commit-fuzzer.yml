@@ -184,7 +184,7 @@ jobs:
             --job-id '${{ matrix.job_id }}' \
             --tests-root 'test/regress/cli' \
             --job-start-time "$JOB_START" \
-            --stop-buffer-minutes 330 \
+            --stop-buffer-minutes 5 \
             --iterations 2147483647 \
             --z3-old-path ${{ github.workspace }}/solvers/z3-4.8.7 \
             --cvc4-path ${{ github.workspace }}/solvers/cvc4-1.6 \
