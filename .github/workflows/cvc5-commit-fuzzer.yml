@@ -143,6 +143,7 @@ jobs:
         run: |
           pip install antlr4-python3-runtime==4.9.2
           pip install z3-solver
+          pip install psutil
           git clone https://github.com/testsmt/yinyang.git
           cd yinyang
           pip install -e .
@@ -174,31 +175,16 @@ jobs:
           ${{ github.workspace }}/solvers/z3-4.8.7 --version
           z3 --version
 
-      - name: Calculate remaining time for fuzzing
-        run: |
-          JOB_START=$(cat /tmp/job_start_${GITHUB_RUN_ID}_${{ matrix.job_id }}.txt)
-          NOW=$(date +%s)
-          ELAPSED=$((NOW - JOB_START))
-          GITHUB_TIMEOUT=21600  # 6 hours (GitHub default)
-          STOP_BUFFER=300  # 5 minutes before GitHub timeout
-          # Stop at: JOB_START + (GITHUB_TIMEOUT - STOP_BUFFER) = JOB_START + 21300s (5h55m from start)
-          STOP_AT_TIME=$((GITHUB_TIMEOUT - STOP_BUFFER))  # 5h55m from job start
-          TIME_REMAINING=$((STOP_AT_TIME - ELAPSED))
-          [ $TIME_REMAINING -lt 0 ] && TIME_REMAINING=0
-          echo "[DEBUG] JOB_START: $JOB_START, NOW: $NOW, ELAPSED: ${ELAPSED}s ($((ELAPSED / 60))m)"
-          echo "[DEBUG] GITHUB_TIMEOUT: ${GITHUB_TIMEOUT}s, STOP_BUFFER: ${STOP_BUFFER}s (5min before timeout)"
-          echo "[DEBUG] Will stop at ${STOP_AT_TIME}s ($((STOP_AT_TIME / 60))m) from job start"
-          echo "[DEBUG] TIME_REMAINING: ${TIME_REMAINING}s ($((TIME_REMAINING / 60))m)"
-          echo "TIME_REMAINING=$TIME_REMAINING" >> $GITHUB_ENV
-
       - name: Run Simple Fuzzer on assigned tests
         working-directory: cvc5
         run: |
-          ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/run_simple_fuzzer.sh \
+          JOB_START=$(cat /tmp/job_start_${GITHUB_RUN_ID}_${{ matrix.job_id }}.txt)
+          ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/simple_commit_fuzzer.py \
             --tests-json '${{ toJson(matrix.tests) }}' \
             --job-id '${{ matrix.job_id }}' \
             --tests-root 'test/regress/cli' \
-            --time-remaining ${{ env.TIME_REMAINING }} \
+            --job-start-time "$JOB_START" \
+            --stop-buffer-minutes 330 \
             --iterations 2147483647 \
             --z3-old-path ${{ github.workspace }}/solvers/z3-4.8.7 \
             --cvc4-path ${{ github.workspace }}/solvers/cvc4-1.6 \
