@@ -2,6 +2,16 @@ name: CVC5 Commit Fuzzer
 
 on:
   workflow_dispatch:
+    inputs:
+      cvc5_commit_hash:
+        description: 'Optional: CVC5 commit hash to analyze (defaults to HEAD)'
+        required: false
+        type: string
+      stop_buffer_minutes:
+        description: 'Optional: Minutes before timeout to stop fuzzing (default: 5)'
+        required: false
+        type: number
+        default: 5
 
 jobs:
   commit-fuzzer:
@@ -10,6 +20,7 @@ jobs:
       matrix: ${{ steps.extract-tests.outputs.matrix }}
       total_tests: ${{ steps.extract-tests.outputs.total_tests }}
       total_jobs: ${{ steps.extract-tests.outputs.total_jobs }}
+      commit_hash: ${{ steps.get-commit.outputs.commit_hash }}
     permissions:
       actions: read
       contents: read
@@ -53,12 +64,137 @@ jobs:
         run: |
           pip install gitpython unidiff "libclang==17.0.6"
 
-      - name: Build cvc5 with coverage
+      - name: Clone CVC5 repository
         run: |
+          if [ -d "cvc5" ]; then
+            echo "CVC5 directory already exists, skipping clone"
+          else
+            git clone https://github.com/cvc5/cvc5.git cvc5
+          fi
+
+      - name: Checkout specific commit if provided
+        if: inputs.cvc5_commit_hash != ''
+        working-directory: cvc5
+        run: |
+          echo "🔨 Checking out provided commit: ${{ inputs.cvc5_commit_hash }}"
+          git fetch origin
+          git checkout ${{ inputs.cvc5_commit_hash }}
+          echo "Checked out commit: $(git rev-parse HEAD)"
+
+      - name: Get CVC5 commit hash
+        id: get-commit
+        working-directory: cvc5
+        run: |
+          COMMIT_HASH=$(git rev-parse HEAD)
+          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+          echo "CVC5 commit hash: $COMMIT_HASH"
+
+      - name: Download coverage binary and compile_commands.json
+        id: download-coverage-binary
+        uses: dawidd6/action-download-artifact@v6
+        continue-on-error: true
+        with:
+          name: coverage-cvc5-${{ steps.get-commit.outputs.commit_hash }}
+          path: artifacts
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: cvc5.yml
+          branch: main
+
+      - name: Extract coverage binary and compile_commands.json
+        id: extract-coverage-binary
+        run: |
+          mkdir -p cvc5/build/bin
+          
+          echo "Checking artifact structure..."
+          find artifacts -type f -name "*.tar.gz" 2>/dev/null | head -10 || true
+          if [ -d "artifacts/bin" ]; then
+            echo "Contents of artifacts/bin:"
+            ls -la artifacts/bin/ || true
+          fi
+          
+          BINARY_EXTRACTED=false
+          
+          # Extract binary - tar.gz contains "bin/cvc5", extract to cvc5/build and move to bin/
+          if [ -f "artifacts/bin/cvc5.tar.gz" ]; then
+            tar -xzf artifacts/bin/cvc5.tar.gz -C cvc5/build --strip-components=1
+            if [ -f "cvc5/build/cvc5" ]; then
+              mv cvc5/build/cvc5 cvc5/build/bin/cvc5
+              echo "Extracted coverage binary from artifacts/bin/cvc5.tar.gz"
+              BINARY_EXTRACTED=true
+            else
+              echo "ERROR: Binary not found after extraction from artifacts/bin/cvc5.tar.gz"
+            fi
+          elif [ -f "artifacts/cvc5/build/bin/cvc5.tar.gz" ]; then
+            tar -xzf artifacts/cvc5/build/bin/cvc5.tar.gz -C cvc5/build --strip-components=1
+            if [ -f "cvc5/build/cvc5" ]; then
+              mv cvc5/build/cvc5 cvc5/build/bin/cvc5
+              echo "Extracted coverage binary from artifacts/cvc5/build/bin/cvc5.tar.gz"
+              BINARY_EXTRACTED=true
+            else
+              echo "ERROR: Binary not found after extraction from artifacts/cvc5/build/bin/cvc5.tar.gz"
+            fi
+          elif [ -f "artifacts/bin/cvc5" ]; then
+            cp artifacts/bin/cvc5 cvc5/build/bin/cvc5
+            chmod +x cvc5/build/bin/cvc5
+            echo "Copied uncompressed binary from artifacts/bin/cvc5"
+            BINARY_EXTRACTED=true
+          else
+            echo "WARNING: Binary archive not found in expected locations"
+          fi
+          
+          # Extract compile_commands.json (try multiple possible paths)
+          if [ -f "artifacts/cvc5/build/compile_commands.json.tar.gz" ]; then
+            tar -xzf artifacts/cvc5/build/compile_commands.json.tar.gz -C cvc5/build
+            echo "Extracted compile_commands.json from artifacts/cvc5/build/compile_commands.json.tar.gz"
+          elif [ -f "artifacts/compile_commands.json.tar.gz" ]; then
+            tar -xzf artifacts/compile_commands.json.tar.gz -C cvc5/build
+            echo "Extracted compile_commands.json from artifacts/compile_commands.json.tar.gz"
+          else
+            echo "WARNING: compile_commands.json archive not found"
+          fi
+          
+          # Extract generated headers (needed for libclang parsing)
+          if [ -f "artifacts/cvc5/build/include.tar.gz" ]; then
+            tar -xzf artifacts/cvc5/build/include.tar.gz -C cvc5/build
+            echo "Extracted generated headers from artifacts/cvc5/build/include.tar.gz"
+          elif [ -f "artifacts/include.tar.gz" ]; then
+            tar -xzf artifacts/include.tar.gz -C cvc5/build
+            echo "Extracted generated headers from artifacts/include.tar.gz"
+          else
+            echo "WARNING: include.tar.gz archive not found (headers may be missing)"
+          fi
+          
+          # Verify binary exists
+          if [ -f "cvc5/build/bin/cvc5" ]; then
+            chmod +x cvc5/build/bin/cvc5
+            cvc5/build/bin/cvc5 --version
+            echo "Binary verified"
+            echo "binary_available=true" >> $GITHUB_OUTPUT
+          else
+            echo "Binary not found after extraction, will build as fallback"
+            echo "binary_available=false" >> $GITHUB_OUTPUT
+          fi
+          
+          if [ -f "cvc5/build/compile_commands.json" ]; then
+            echo "compile_commands.json verified"
+          else
+            echo "WARNING: compile_commands.json not found"
+          fi
+          
+          if [ -d "cvc5/build/include" ]; then
+            echo "Generated headers (include/) verified"
+          else
+            echo "WARNING: include/ directory not found (libclang parsing may fail)"
+          fi
+
+      - name: Build cvc5 static binary with coverage (fallback)
+        if: steps.extract-coverage-binary.outputs.binary_available != 'true'
+        run: |
+          echo "🔨 Building CVC5 static binary with coverage as fallback (binary not available from artifacts)"
           # Set environment variables to ensure clang uses GCC 14 toolchain
           export CXX="clang++ --gcc-toolchain=/usr"
           export CC="clang --gcc-toolchain=/usr"
-          ./scripts/cvc5/build.sh --coverage
+          ./scripts/cvc5/build.sh --static --coverage
       
       - name: Download coverage map
         uses: dawidd6/action-download-artifact@v6
@@ -67,6 +203,7 @@ jobs:
           path: .
           github_token: ${{ secrets.GITHUB_TOKEN }}
           workflow: cvc5-coverage-mapper.yml
+          branch: main
       
       - name: Extract coverage map
         run: |
@@ -79,6 +216,7 @@ jobs:
         env:
           SKIP_COVERAGE_ENFORCEMENT: "true"
           MAX_JOBS: 10
+          CVC5_COMMIT_HASH: ${{ steps.get-commit.outputs.commit_hash }}
         run: |
           # Run commit fuzzer with matrix output (1 commit instead of 50)
           # Start with 10 jobs max (for testing)
@@ -165,9 +303,79 @@ jobs:
           chmod +x ${{ github.workspace }}/solvers/z3-4.8.7
           rm -rf /tmp/z3.zip /tmp/z3-4.8.7-x64-ubuntu-16.04
 
-      - name: Build cvc5
+      - name: Clone CVC5 repository
         run: |
-          ./scripts/cvc5/build.sh
+          if [ -d "cvc5" ]; then
+            echo "CVC5 directory already exists, skipping clone"
+          else
+            git clone https://github.com/cvc5/cvc5.git cvc5
+          fi
+
+      - name: Checkout same commit as first job
+        working-directory: cvc5
+        run: |
+          git fetch origin
+          git checkout ${{ needs.commit-fuzzer.outputs.commit_hash }}
+          echo "Checked out commit: $(git rev-parse HEAD)"
+
+      - name: Download production binary
+        id: download-production-binary
+        uses: dawidd6/action-download-artifact@v6
+        continue-on-error: true
+        with:
+          name: cvc5-${{ needs.commit-fuzzer.outputs.commit_hash }}
+          path: artifacts
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: cvc5.yml
+          branch: main
+
+      - name: Extract production binary
+        id: extract-production-binary
+        run: |
+          mkdir -p cvc5/build/bin
+          
+          # Extract binary - tar.gz contains "bin/cvc5", extract to cvc5/build and move to bin/
+          if [ -f "artifacts/bin/cvc5.tar.gz" ]; then
+            tar -xzf artifacts/bin/cvc5.tar.gz -C cvc5/build --strip-components=1
+            if [ -f "cvc5/build/cvc5" ]; then
+              mv cvc5/build/cvc5 cvc5/build/bin/cvc5
+              echo "Extracted production binary from artifacts/bin/cvc5.tar.gz"
+            else
+              echo "ERROR: Binary not found after extraction from artifacts/bin/cvc5.tar.gz"
+            fi
+          elif [ -f "artifacts/cvc5/build/bin/cvc5.tar.gz" ]; then
+            tar -xzf artifacts/cvc5/build/bin/cvc5.tar.gz -C cvc5/build --strip-components=1
+            if [ -f "cvc5/build/cvc5" ]; then
+              mv cvc5/build/cvc5 cvc5/build/bin/cvc5
+              echo "Extracted production binary from artifacts/cvc5/build/bin/cvc5.tar.gz"
+            else
+              echo "ERROR: Binary not found after extraction from artifacts/cvc5/build/bin/cvc5.tar.gz"
+            fi
+          elif [ -f "artifacts/bin/cvc5" ]; then
+            cp artifacts/bin/cvc5 cvc5/build/bin/cvc5
+            chmod +x cvc5/build/bin/cvc5
+            echo "Copied uncompressed binary from artifacts/bin/cvc5"
+          else
+            echo "WARNING: Binary archive not found. Checking artifact structure:"
+            find artifacts -name "*.tar.gz" -o -name "cvc5" 2>/dev/null | head -20 || ls -laR artifacts/ || echo "artifacts directory does not exist"
+          fi
+          
+          # Verify binary
+          if [ -f "cvc5/build/bin/cvc5" ]; then
+            chmod +x cvc5/build/bin/cvc5
+            cvc5/build/bin/cvc5 --version
+            echo "Binary verified"
+            echo "binary_available=true" >> $GITHUB_OUTPUT
+          else
+            echo "Binary not found after extraction, will build as fallback"
+            echo "binary_available=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build cvc5 static binary (fallback)
+        if: steps.extract-production-binary.outputs.binary_available != 'true'
+        run: |
+          echo "🔨 Building CVC5 static binary as fallback (binary not available from artifacts)"
+          ./scripts/cvc5/build.sh --static
 
       - name: Verify solver binaries
         run: |
@@ -184,7 +392,7 @@ jobs:
             --job-id '${{ matrix.job_id }}' \
             --tests-root 'test/regress/cli' \
             --job-start-time "$JOB_START" \
-            --stop-buffer-minutes 5 \
+            --stop-buffer-minutes ${{ inputs.stop_buffer_minutes || 5 }} \
             --iterations 2147483647 \
             --z3-old-path ${{ github.workspace }}/solvers/z3-4.8.7 \
             --cvc4-path ${{ github.workspace }}/solvers/cvc4-1.6 \
