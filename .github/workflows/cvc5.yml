@@ -180,7 +180,12 @@ jobs:
           cd ..
       
       - name: Build CVC5 static binary with coverage
-        run: ./scripts/cvc5/build.sh --static --coverage
+        run: |
+          # Use clang with GCC toolchain to generate clang-compatible compile_commands.json
+          # while still producing GCC-format coverage data (needed for fastcov)
+          export CXX="clang++ --gcc-toolchain=/usr"
+          export CC="clang --gcc-toolchain=/usr"
+          ./scripts/cvc5/build.sh --static --coverage
       
       - name: Get commit hash
         id: get-commit
