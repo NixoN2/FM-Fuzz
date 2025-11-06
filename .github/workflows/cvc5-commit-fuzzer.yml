@@ -100,91 +100,27 @@ jobs:
           workflow: cvc5.yml
           branch: main
 
-      - name: Extract coverage binary and compile_commands.json
+      - name: Extract coverage binary, headers, and compile_commands.json
         id: extract-coverage-binary
         run: |
-          mkdir -p cvc5/build/bin
-          
-          echo "Checking artifact structure..."
-          find artifacts -type f -name "*.tar.gz" 2>/dev/null | head -10 || true
-          if [ -d "artifacts/bin" ]; then
-            echo "Contents of artifacts/bin:"
-            ls -la artifacts/bin/ || true
+          # Find artifacts.tar.gz
+          ARTIFACT_FILE=""
+          if [ -f "artifacts/artifacts.tar.gz" ]; then
+            ARTIFACT_FILE="artifacts/artifacts.tar.gz"
+          elif [ -f "artifacts/cvc5/build/artifacts.tar.gz" ]; then
+            ARTIFACT_FILE="artifacts/cvc5/build/artifacts.tar.gz"
           fi
           
-          BINARY_EXTRACTED=false
-          
-          # Extract binary - tar.gz contains "bin/cvc5", extract to cvc5/build and move to bin/
-          if [ -f "artifacts/bin/cvc5.tar.gz" ]; then
-            tar -xzf artifacts/bin/cvc5.tar.gz -C cvc5/build --strip-components=1
-            if [ -f "cvc5/build/cvc5" ]; then
-              mv cvc5/build/cvc5 cvc5/build/bin/cvc5
-              echo "Extracted coverage binary from artifacts/bin/cvc5.tar.gz"
-              BINARY_EXTRACTED=true
+          if [ -n "$ARTIFACT_FILE" ]; then
+            ./scripts/cvc5/extract_build_artifacts.sh "$ARTIFACT_FILE" cvc5/build true
+            if [ -f "cvc5/build/bin/cvc5" ]; then
+              echo "binary_available=true" >> $GITHUB_OUTPUT
             else
-              echo "ERROR: Binary not found after extraction from artifacts/bin/cvc5.tar.gz"
+              echo "binary_available=false" >> $GITHUB_OUTPUT
             fi
-          elif [ -f "artifacts/cvc5/build/bin/cvc5.tar.gz" ]; then
-            tar -xzf artifacts/cvc5/build/bin/cvc5.tar.gz -C cvc5/build --strip-components=1
-            if [ -f "cvc5/build/cvc5" ]; then
-              mv cvc5/build/cvc5 cvc5/build/bin/cvc5
-              echo "Extracted coverage binary from artifacts/cvc5/build/bin/cvc5.tar.gz"
-              BINARY_EXTRACTED=true
-            else
-              echo "ERROR: Binary not found after extraction from artifacts/cvc5/build/bin/cvc5.tar.gz"
-            fi
-          elif [ -f "artifacts/bin/cvc5" ]; then
-            cp artifacts/bin/cvc5 cvc5/build/bin/cvc5
-            chmod +x cvc5/build/bin/cvc5
-            echo "Copied uncompressed binary from artifacts/bin/cvc5"
-            BINARY_EXTRACTED=true
           else
-            echo "WARNING: Binary archive not found in expected locations"
-          fi
-          
-          # Extract compile_commands.json (try multiple possible paths)
-          if [ -f "artifacts/cvc5/build/compile_commands.json.tar.gz" ]; then
-            tar -xzf artifacts/cvc5/build/compile_commands.json.tar.gz -C cvc5/build
-            echo "Extracted compile_commands.json from artifacts/cvc5/build/compile_commands.json.tar.gz"
-          elif [ -f "artifacts/compile_commands.json.tar.gz" ]; then
-            tar -xzf artifacts/compile_commands.json.tar.gz -C cvc5/build
-            echo "Extracted compile_commands.json from artifacts/compile_commands.json.tar.gz"
-          else
-            echo "WARNING: compile_commands.json archive not found"
-          fi
-          
-          # Extract generated headers (needed for libclang parsing)
-          if [ -f "artifacts/cvc5/build/include.tar.gz" ]; then
-            tar -xzf artifacts/cvc5/build/include.tar.gz -C cvc5/build
-            echo "Extracted generated headers from artifacts/cvc5/build/include.tar.gz"
-          elif [ -f "artifacts/include.tar.gz" ]; then
-            tar -xzf artifacts/include.tar.gz -C cvc5/build
-            echo "Extracted generated headers from artifacts/include.tar.gz"
-          else
-            echo "WARNING: include.tar.gz archive not found (headers may be missing)"
-          fi
-          
-          # Verify binary exists
-          if [ -f "cvc5/build/bin/cvc5" ]; then
-            chmod +x cvc5/build/bin/cvc5
-            cvc5/build/bin/cvc5 --version
-            echo "Binary verified"
-            echo "binary_available=true" >> $GITHUB_OUTPUT
-          else
-            echo "Binary not found after extraction, will build as fallback"
+            echo "WARNING: artifacts.tar.gz not found, will build as fallback"
             echo "binary_available=false" >> $GITHUB_OUTPUT
-          fi
-          
-          if [ -f "cvc5/build/compile_commands.json" ]; then
-            echo "compile_commands.json verified"
-          else
-            echo "WARNING: compile_commands.json not found"
-          fi
-          
-          if [ -d "cvc5/build/include" ]; then
-            echo "Generated headers (include/) verified"
-          else
-            echo "WARNING: include/ directory not found (libclang parsing may fail)"
           fi
 
       - name: Build cvc5 static binary with coverage (fallback)
@@ -332,42 +268,23 @@ jobs:
       - name: Extract production binary
         id: extract-production-binary
         run: |
-          mkdir -p cvc5/build/bin
-          
-          # Extract binary - tar.gz contains "bin/cvc5", extract to cvc5/build and move to bin/
-          if [ -f "artifacts/bin/cvc5.tar.gz" ]; then
-            tar -xzf artifacts/bin/cvc5.tar.gz -C cvc5/build --strip-components=1
-            if [ -f "cvc5/build/cvc5" ]; then
-              mv cvc5/build/cvc5 cvc5/build/bin/cvc5
-              echo "Extracted production binary from artifacts/bin/cvc5.tar.gz"
-            else
-              echo "ERROR: Binary not found after extraction from artifacts/bin/cvc5.tar.gz"
-            fi
-          elif [ -f "artifacts/cvc5/build/bin/cvc5.tar.gz" ]; then
-            tar -xzf artifacts/cvc5/build/bin/cvc5.tar.gz -C cvc5/build --strip-components=1
-            if [ -f "cvc5/build/cvc5" ]; then
-              mv cvc5/build/cvc5 cvc5/build/bin/cvc5
-              echo "Extracted production binary from artifacts/cvc5/build/bin/cvc5.tar.gz"
-            else
-              echo "ERROR: Binary not found after extraction from artifacts/cvc5/build/bin/cvc5.tar.gz"
-            fi
-          elif [ -f "artifacts/bin/cvc5" ]; then
-            cp artifacts/bin/cvc5 cvc5/build/bin/cvc5
-            chmod +x cvc5/build/bin/cvc5
-            echo "Copied uncompressed binary from artifacts/bin/cvc5"
-          else
-            echo "WARNING: Binary archive not found. Checking artifact structure:"
-            find artifacts -name "*.tar.gz" -o -name "cvc5" 2>/dev/null | head -20 || ls -laR artifacts/ || echo "artifacts directory does not exist"
+          # Find artifacts.tar.gz (production binary doesn't need headers)
+          ARTIFACT_FILE=""
+          if [ -f "artifacts/artifacts.tar.gz" ]; then
+            ARTIFACT_FILE="artifacts/artifacts.tar.gz"
+          elif [ -f "artifacts/cvc5/build/artifacts.tar.gz" ]; then
+            ARTIFACT_FILE="artifacts/cvc5/build/artifacts.tar.gz"
           fi
           
-          # Verify binary
-          if [ -f "cvc5/build/bin/cvc5" ]; then
-            chmod +x cvc5/build/bin/cvc5
-            cvc5/build/bin/cvc5 --version
-            echo "Binary verified"
-            echo "binary_available=true" >> $GITHUB_OUTPUT
+          if [ -n "$ARTIFACT_FILE" ]; then
+            ./scripts/cvc5/extract_build_artifacts.sh "$ARTIFACT_FILE" cvc5/build false
+            if [ -f "cvc5/build/bin/cvc5" ]; then
+              echo "binary_available=true" >> $GITHUB_OUTPUT
+            else
+              echo "binary_available=false" >> $GITHUB_OUTPUT
+            fi
           else
-            echo "Binary not found after extraction, will build as fallback"
+            echo "WARNING: artifacts.tar.gz not found, will build as fallback"
             echo "binary_available=false" >> $GITHUB_OUTPUT
           fi
 
