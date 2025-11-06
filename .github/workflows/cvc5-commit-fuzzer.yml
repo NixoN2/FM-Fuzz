@@ -105,24 +105,43 @@ jobs:
         run: |
           mkdir -p cvc5/build/bin
           
-          BINARY_EXTRACTED=false
-          
-          # Extract binary (artifact path: cvc5/build/bin/cvc5.tar.gz)
-          if [ -f "artifacts/cvc5/build/bin/cvc5.tar.gz" ]; then
-            tar -xzf artifacts/cvc5/build/bin/cvc5.tar.gz -C cvc5/build/bin
-            echo "Extracted coverage binary"
-            BINARY_EXTRACTED=true
-          else
-            echo "WARNING: Binary archive not found at artifacts/cvc5/build/bin/cvc5.tar.gz"
-            ls -la artifacts/ || echo "artifacts directory does not exist"
+          echo "Checking artifact structure..."
+          find artifacts -type f -name "*.tar.gz" 2>/dev/null | head -10 || true
+          if [ -d "artifacts/bin" ]; then
+            echo "Contents of artifacts/bin:"
+            ls -la artifacts/bin/ || true
           fi
           
-          # Extract compile_commands.json (artifact path: cvc5/build/compile_commands.json.tar.gz)
+          BINARY_EXTRACTED=false
+          
+          # Try multiple possible artifact paths (artifact structure may vary)
+          if [ -f "artifacts/cvc5/build/bin/cvc5.tar.gz" ]; then
+            tar -xzf artifacts/cvc5/build/bin/cvc5.tar.gz -C cvc5/build/bin
+            echo "Extracted coverage binary from artifacts/cvc5/build/bin/cvc5.tar.gz"
+            BINARY_EXTRACTED=true
+          elif [ -f "artifacts/bin/cvc5.tar.gz" ]; then
+            tar -xzf artifacts/bin/cvc5.tar.gz -C cvc5/build/bin
+            echo "Extracted coverage binary from artifacts/bin/cvc5.tar.gz"
+            BINARY_EXTRACTED=true
+          elif [ -f "artifacts/bin/cvc5" ]; then
+            # Binary might be uncompressed
+            cp artifacts/bin/cvc5 cvc5/build/bin/cvc5
+            chmod +x cvc5/build/bin/cvc5
+            echo "Copied uncompressed binary from artifacts/bin/cvc5"
+            BINARY_EXTRACTED=true
+          else
+            echo "WARNING: Binary archive not found in expected locations"
+          fi
+          
+          # Extract compile_commands.json (try multiple possible paths)
           if [ -f "artifacts/cvc5/build/compile_commands.json.tar.gz" ]; then
             tar -xzf artifacts/cvc5/build/compile_commands.json.tar.gz -C cvc5/build
-            echo "Extracted compile_commands.json"
+            echo "Extracted compile_commands.json from artifacts/cvc5/build/compile_commands.json.tar.gz"
+          elif [ -f "artifacts/compile_commands.json.tar.gz" ]; then
+            tar -xzf artifacts/compile_commands.json.tar.gz -C cvc5/build
+            echo "Extracted compile_commands.json from artifacts/compile_commands.json.tar.gz"
           else
-            echo "WARNING: compile_commands.json archive not found at artifacts/cvc5/build/compile_commands.json.tar.gz"
+            echo "WARNING: compile_commands.json archive not found"
           fi
           
           # Verify binary exists
@@ -289,13 +308,16 @@ jobs:
         run: |
           mkdir -p cvc5/build/bin
           
-          # Extract binary (artifact path: cvc5/build/bin/cvc5.tar.gz)
+          # Try multiple possible artifact paths (artifact structure may vary)
           if [ -f "artifacts/cvc5/build/bin/cvc5.tar.gz" ]; then
             tar -xzf artifacts/cvc5/build/bin/cvc5.tar.gz -C cvc5/build/bin
-            echo "Extracted production binary"
+            echo "Extracted production binary from artifacts/cvc5/build/bin/cvc5.tar.gz"
+          elif [ -f "artifacts/bin/cvc5.tar.gz" ]; then
+            tar -xzf artifacts/bin/cvc5.tar.gz -C cvc5/build/bin
+            echo "Extracted production binary from artifacts/bin/cvc5.tar.gz"
           else
-            echo "WARNING: Binary archive not found at artifacts/cvc5/build/bin/cvc5.tar.gz"
-            ls -la artifacts/ || echo "artifacts directory does not exist"
+            echo "WARNING: Binary archive not found. Checking artifact structure:"
+            find artifacts -name "*.tar.gz" -o -name "cvc5" 2>/dev/null | head -20 || ls -laR artifacts/ || echo "artifacts directory does not exist"
           fi
           
           # Verify binary
