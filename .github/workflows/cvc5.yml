@@ -14,20 +14,12 @@ jobs:
   check-upstream:
     runs-on: ubuntu-latest
     outputs:
-      build_needed: ${{ steps.check-upstream.outputs.build_needed }}
-      sha: ${{ steps.check-upstream.outputs.sha }}
+      build_needed: ${{ steps.set-outputs.outputs.build_needed }}
+      sha: ${{ steps.set-outputs.outputs.sha }}
     
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-      
-      - name: Handle provided commit hash
-        if: inputs.cvc5_commit_hash != ''
-        id: provided-commit
-        run: |
-          echo "🔨 Building provided commit hash: ${{ inputs.cvc5_commit_hash }}"
-          echo "build_needed=true" >> $GITHUB_OUTPUT
-          echo "sha=${{ inputs.cvc5_commit_hash }}" >> $GITHUB_OUTPUT
       
       - name: Download last built SHA from artifacts
         if: inputs.cvc5_commit_hash == ''
@@ -40,33 +32,38 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           workflow: cvc5.yml
       
-      - name: Check for upstream changes
-        if: inputs.cvc5_commit_hash == ''
-        id: check-upstream
+      - name: Check upstream or use provided commit
+        id: set-outputs
         run: |
-          ./scripts/check-upstream.sh cvc5 https://github.com/cvc5/cvc5.git
-          echo "build_needed=$(cat .build_status | grep build_needed | cut -d'=' -f2)" >> $GITHUB_OUTPUT
-          echo "sha=$(cat .build_status | grep sha | cut -d'=' -f2)" >> $GITHUB_OUTPUT
-          # Ensure cache directory exists and file is created
+          if [ -n "${{ inputs.cvc5_commit_hash }}" ]; then
+            echo "🔨 Building provided commit hash: ${{ inputs.cvc5_commit_hash }}"
+            echo "build_needed=true" >> $GITHUB_OUTPUT
+            echo "sha=${{ inputs.cvc5_commit_hash }}" >> $GITHUB_OUTPUT
+          else
+            echo "📥 Checking for upstream changes..."
+            # Ensure .cache directory exists
+            mkdir -p .cache
+            ./scripts/check-upstream.sh cvc5 https://github.com/cvc5/cvc5.git
+            echo "build_needed=$(cat .build_status | grep build_needed | cut -d'=' -f2)" >> $GITHUB_OUTPUT
+            echo "sha=$(cat .build_status | grep sha | cut -d'=' -f2)" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Upload last built SHA artifact (keep fresh when no build needed)
+        if: inputs.cvc5_commit_hash == '' && steps.set-outputs.outputs.build_needed == 'false'
+        run: |
           mkdir -p .cache
           if [ ! -f ".cache/cvc5_last_sha" ]; then
-            echo "$(cat .build_status | grep sha | cut -d'=' -f2)" > .cache/cvc5_last_sha
+            echo "${{ steps.set-outputs.outputs.sha }}" > .cache/cvc5_last_sha
           fi
       
       - name: Upload last built SHA artifact
-        if: inputs.cvc5_commit_hash == ''
+        if: inputs.cvc5_commit_hash == '' && steps.set-outputs.outputs.build_needed == 'false'
         uses: actions/upload-artifact@v4
         with:
           name: cvc5-last-sha
           path: .cache/cvc5_last_sha
           retention-days: 30
           if-no-files-found: ignore
-      
-      - name: Set outputs for provided commit
-        if: inputs.cvc5_commit_hash != ''
-        run: |
-          echo "build_needed=true" >> $GITHUB_OUTPUT
-          echo "sha=${{ inputs.cvc5_commit_hash }}" >> $GITHUB_OUTPUT
 
   build-static:
     needs: check-upstream
