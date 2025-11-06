@@ -91,14 +91,14 @@ jobs:
 
       - name: Download coverage binary and compile_commands.json
         id: download-coverage-binary
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@v11
         continue-on-error: true
         with:
           name: coverage-cvc5-${{ steps.get-commit.outputs.commit_hash }}
           path: artifacts
           github_token: ${{ secrets.GITHUB_TOKEN }}
           workflow: cvc5.yml
-          branch: main
+          search_artifacts: true
 
       - name: Extract coverage binary, headers, and compile_commands.json
         id: extract-coverage-binary
@@ -133,13 +133,13 @@ jobs:
           ./scripts/cvc5/build.sh --static --coverage
       
       - name: Download coverage map
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@v11
         with:
           name: coverage-mapping
           path: .
           github_token: ${{ secrets.GITHUB_TOKEN }}
           workflow: cvc5-coverage-mapper.yml
-          branch: main
+          search_artifacts: true
       
       - name: Extract coverage map
         run: |
@@ -256,14 +256,14 @@ jobs:
 
       - name: Download production binary
         id: download-production-binary
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@v11
         continue-on-error: true
         with:
           name: cvc5-${{ needs.commit-fuzzer.outputs.commit_hash }}
           path: artifacts
           github_token: ${{ secrets.GITHUB_TOKEN }}
           workflow: cvc5.yml
-          branch: main
+          search_artifacts: true
 
       - name: Extract production binary
         id: extract-production-binary
