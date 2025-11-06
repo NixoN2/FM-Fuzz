@@ -154,12 +154,18 @@ fi
 # Get commits that changed files in src/ folder
 echo "Getting commits that changed files in src/ folder..."
 
-# TESTING: Use fixed commit instead of dynamic discovery
-FIXED_COMMIT="18d0c5e070dfa4c8b643ea1a9b656cf3191bc2f2"
-echo "TESTING MODE: Using fixed commit $FIXED_COMMIT"
-COMMITS=("$FIXED_COMMIT")
+# Use HEAD commit if CVC5_COMMIT_HASH is not set, otherwise use the specified commit
+if [ -n "$CVC5_COMMIT_HASH" ]; then
+    echo "Using provided commit hash: $CVC5_COMMIT_HASH"
+    COMMITS=("$CVC5_COMMIT_HASH")
+else
+    # Use HEAD commit (current checked out commit)
+    HEAD_COMMIT=$(git rev-parse HEAD)
+    echo "Using HEAD commit: $HEAD_COMMIT"
+    COMMITS=("$HEAD_COMMIT")
+fi
 
-# COMMENTED OUT: Dynamic commit discovery
+# Alternative: Dynamic commit discovery (commented out for now)
 # COMMITS=()
 # # Scan window: 5x requested commits to ensure enough src/ changes
 # SCAN_LIMIT=$((COMMITS_TO_ANALYZE * 5))

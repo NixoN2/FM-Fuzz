@@ -2,6 +2,11 @@ name: CVC5 Commit Fuzzer
 
 on:
   workflow_dispatch:
+    inputs:
+      cvc5_commit_hash:
+        description: 'Optional: CVC5 commit hash to analyze (defaults to HEAD)'
+        required: false
+        type: string
 
 jobs:
   commit-fuzzer:
@@ -10,6 +15,7 @@ jobs:
       matrix: ${{ steps.extract-tests.outputs.matrix }}
       total_tests: ${{ steps.extract-tests.outputs.total_tests }}
       total_jobs: ${{ steps.extract-tests.outputs.total_jobs }}
+      commit_hash: ${{ steps.get-commit.outputs.commit_hash }}
     permissions:
       actions: read
       contents: read
@@ -53,12 +59,76 @@ jobs:
         run: |
           pip install gitpython unidiff "libclang==17.0.6"
 
-      - name: Build cvc5 with coverage
+      - name: Clone CVC5 repository
         run: |
-          # Set environment variables to ensure clang uses GCC 14 toolchain
-          export CXX="clang++ --gcc-toolchain=/usr"
-          export CC="clang --gcc-toolchain=/usr"
-          ./scripts/cvc5/build.sh --coverage
+          if [ -d "cvc5" ]; then
+            echo "CVC5 directory already exists, skipping clone"
+          else
+            git clone https://github.com/cvc5/cvc5.git cvc5
+          fi
+
+      - name: Checkout specific commit if provided
+        if: inputs.cvc5_commit_hash != ''
+        working-directory: cvc5
+        run: |
+          echo "🔨 Checking out provided commit: ${{ inputs.cvc5_commit_hash }}"
+          git fetch origin
+          git checkout ${{ inputs.cvc5_commit_hash }}
+          echo "Checked out commit: $(git rev-parse HEAD)"
+
+      - name: Get CVC5 commit hash
+        id: get-commit
+        working-directory: cvc5
+        run: |
+          COMMIT_HASH=$(git rev-parse HEAD)
+          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+          echo "CVC5 commit hash: $COMMIT_HASH"
+
+      - name: Download coverage binary and compile_commands.json
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          name: coverage-cvc5-${{ steps.get-commit.outputs.commit_hash }}
+          path: artifacts
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: cvc5.yml
+
+      - name: Extract coverage binary and compile_commands.json
+        run: |
+          mkdir -p cvc5/build/bin
+          
+          # Extract binary (artifact path: cvc5/build/bin/cvc5.tar.gz)
+          if [ -f "artifacts/cvc5/build/bin/cvc5.tar.gz" ]; then
+            tar -xzf artifacts/cvc5/build/bin/cvc5.tar.gz -C cvc5/build/bin
+            echo "Extracted coverage binary"
+          else
+            echo "ERROR: Binary archive not found at artifacts/cvc5/build/bin/cvc5.tar.gz"
+            ls -la artifacts/ || echo "artifacts directory does not exist"
+            exit 1
+          fi
+          
+          # Extract compile_commands.json (artifact path: cvc5/build/compile_commands.json.tar.gz)
+          if [ -f "artifacts/cvc5/build/compile_commands.json.tar.gz" ]; then
+            tar -xzf artifacts/cvc5/build/compile_commands.json.tar.gz -C cvc5/build
+            echo "Extracted compile_commands.json"
+          else
+            echo "WARNING: compile_commands.json archive not found at artifacts/cvc5/build/compile_commands.json.tar.gz"
+          fi
+          
+          # Verify files
+          if [ -f "cvc5/build/bin/cvc5" ]; then
+            chmod +x cvc5/build/bin/cvc5
+            cvc5/build/bin/cvc5 --version
+            echo "Binary verified"
+          else
+            echo "ERROR: Binary not found after extraction"
+            exit 1
+          fi
+          
+          if [ -f "cvc5/build/compile_commands.json" ]; then
+            echo "compile_commands.json verified"
+          else
+            echo "WARNING: compile_commands.json not found"
+          fi
       
       - name: Download coverage map
         uses: dawidd6/action-download-artifact@v6
@@ -79,6 +149,7 @@ jobs:
         env:
           SKIP_COVERAGE_ENFORCEMENT: "true"
           MAX_JOBS: 10
+          CVC5_COMMIT_HASH: ${{ steps.get-commit.outputs.commit_hash }}
         run: |
           # Run commit fuzzer with matrix output (1 commit instead of 50)
           # Start with 10 jobs max (for testing)
@@ -165,9 +236,52 @@ jobs:
           chmod +x ${{ github.workspace }}/solvers/z3-4.8.7
           rm -rf /tmp/z3.zip /tmp/z3-4.8.7-x64-ubuntu-16.04
 
-      - name: Build cvc5
+      - name: Clone CVC5 repository
         run: |
-          ./scripts/cvc5/build.sh
+          if [ -d "cvc5" ]; then
+            echo "CVC5 directory already exists, skipping clone"
+          else
+            git clone https://github.com/cvc5/cvc5.git cvc5
+          fi
+
+      - name: Checkout same commit as first job
+        working-directory: cvc5
+        run: |
+          git fetch origin
+          git checkout ${{ needs.commit-fuzzer.outputs.commit_hash }}
+          echo "Checked out commit: $(git rev-parse HEAD)"
+
+      - name: Download production binary
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          name: cvc5-${{ needs.commit-fuzzer.outputs.commit_hash }}
+          path: artifacts
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: cvc5.yml
+
+      - name: Extract production binary
+        run: |
+          mkdir -p cvc5/build/bin
+          
+          # Extract binary (artifact path: cvc5/build/bin/cvc5.tar.gz)
+          if [ -f "artifacts/cvc5/build/bin/cvc5.tar.gz" ]; then
+            tar -xzf artifacts/cvc5/build/bin/cvc5.tar.gz -C cvc5/build/bin
+            echo "Extracted production binary"
+          else
+            echo "ERROR: Binary archive not found at artifacts/cvc5/build/bin/cvc5.tar.gz"
+            ls -la artifacts/ || echo "artifacts directory does not exist"
+            exit 1
+          fi
+          
+          # Verify binary
+          if [ -f "cvc5/build/bin/cvc5" ]; then
+            chmod +x cvc5/build/bin/cvc5
+            cvc5/build/bin/cvc5 --version
+            echo "Binary verified"
+          else
+            echo "ERROR: Binary not found after extraction"
+            exit 1
+          fi
 
       - name: Verify solver binaries
         run: |
@@ -184,7 +298,7 @@ jobs:
             --job-id '${{ matrix.job_id }}' \
             --tests-root 'test/regress/cli' \
             --job-start-time "$JOB_START" \
-            --stop-buffer-minutes 5 \
+            --stop-buffer-minutes 345 \
             --iterations 2147483647 \
             --z3-old-path ${{ github.workspace }}/solvers/z3-4.8.7 \
             --cvc4-path ${{ github.workspace }}/solvers/cvc4-1.6 \
