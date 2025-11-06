@@ -114,20 +114,26 @@ jobs:
           
           BINARY_EXTRACTED=false
           
-          # Try multiple possible artifact paths (artifact structure may vary)
-          # Note: tar.gz contains "bin/cvc5", so we extract to cvc5/build and strip the "bin/" prefix, then move to bin/
-          if [ -f "artifacts/cvc5/build/bin/cvc5.tar.gz" ]; then
-            tar -xzf artifacts/cvc5/build/bin/cvc5.tar.gz -C cvc5/build --strip-components=1
-            mv cvc5/build/cvc5 cvc5/build/bin/cvc5 2>/dev/null || true
-            echo "Extracted coverage binary from artifacts/cvc5/build/bin/cvc5.tar.gz"
-            BINARY_EXTRACTED=true
-          elif [ -f "artifacts/bin/cvc5.tar.gz" ]; then
+          # Extract binary - tar.gz contains "bin/cvc5", extract to cvc5/build and move to bin/
+          if [ -f "artifacts/bin/cvc5.tar.gz" ]; then
             tar -xzf artifacts/bin/cvc5.tar.gz -C cvc5/build --strip-components=1
-            mv cvc5/build/cvc5 cvc5/build/bin/cvc5 2>/dev/null || true
-            echo "Extracted coverage binary from artifacts/bin/cvc5.tar.gz"
-            BINARY_EXTRACTED=true
+            if [ -f "cvc5/build/cvc5" ]; then
+              mv cvc5/build/cvc5 cvc5/build/bin/cvc5
+              echo "Extracted coverage binary from artifacts/bin/cvc5.tar.gz"
+              BINARY_EXTRACTED=true
+            else
+              echo "ERROR: Binary not found after extraction from artifacts/bin/cvc5.tar.gz"
+            fi
+          elif [ -f "artifacts/cvc5/build/bin/cvc5.tar.gz" ]; then
+            tar -xzf artifacts/cvc5/build/bin/cvc5.tar.gz -C cvc5/build --strip-components=1
+            if [ -f "cvc5/build/cvc5" ]; then
+              mv cvc5/build/cvc5 cvc5/build/bin/cvc5
+              echo "Extracted coverage binary from artifacts/cvc5/build/bin/cvc5.tar.gz"
+              BINARY_EXTRACTED=true
+            else
+              echo "ERROR: Binary not found after extraction from artifacts/cvc5/build/bin/cvc5.tar.gz"
+            fi
           elif [ -f "artifacts/bin/cvc5" ]; then
-            # Binary might be uncompressed
             cp artifacts/bin/cvc5 cvc5/build/bin/cvc5
             chmod +x cvc5/build/bin/cvc5
             echo "Copied uncompressed binary from artifacts/bin/cvc5"
@@ -147,6 +153,17 @@ jobs:
             echo "WARNING: compile_commands.json archive not found"
           fi
           
+          # Extract generated headers (needed for libclang parsing)
+          if [ -f "artifacts/cvc5/build/include.tar.gz" ]; then
+            tar -xzf artifacts/cvc5/build/include.tar.gz -C cvc5/build
+            echo "Extracted generated headers from artifacts/cvc5/build/include.tar.gz"
+          elif [ -f "artifacts/include.tar.gz" ]; then
+            tar -xzf artifacts/include.tar.gz -C cvc5/build
+            echo "Extracted generated headers from artifacts/include.tar.gz"
+          else
+            echo "WARNING: include.tar.gz archive not found (headers may be missing)"
+          fi
+          
           # Verify binary exists
           if [ -f "cvc5/build/bin/cvc5" ]; then
             chmod +x cvc5/build/bin/cvc5
@@ -162,6 +179,12 @@ jobs:
             echo "compile_commands.json verified"
           else
             echo "WARNING: compile_commands.json not found"
+          fi
+          
+          if [ -d "cvc5/build/include" ]; then
+            echo "Generated headers (include/) verified"
+          else
+            echo "WARNING: include/ directory not found (libclang parsing may fail)"
           fi
 
       - name: Build cvc5 static binary with coverage (fallback)
@@ -311,18 +334,24 @@ jobs:
         run: |
           mkdir -p cvc5/build/bin
           
-          # Try multiple possible artifact paths (artifact structure may vary)
-          # Note: tar.gz contains "bin/cvc5", so we extract to cvc5/build and strip the "bin/" prefix, then move to bin/
-          if [ -f "artifacts/cvc5/build/bin/cvc5.tar.gz" ]; then
-            tar -xzf artifacts/cvc5/build/bin/cvc5.tar.gz -C cvc5/build --strip-components=1
-            mv cvc5/build/cvc5 cvc5/build/bin/cvc5 2>/dev/null || true
-            echo "Extracted production binary from artifacts/cvc5/build/bin/cvc5.tar.gz"
-          elif [ -f "artifacts/bin/cvc5.tar.gz" ]; then
+          # Extract binary - tar.gz contains "bin/cvc5", extract to cvc5/build and move to bin/
+          if [ -f "artifacts/bin/cvc5.tar.gz" ]; then
             tar -xzf artifacts/bin/cvc5.tar.gz -C cvc5/build --strip-components=1
-            mv cvc5/build/cvc5 cvc5/build/bin/cvc5 2>/dev/null || true
-            echo "Extracted production binary from artifacts/bin/cvc5.tar.gz"
+            if [ -f "cvc5/build/cvc5" ]; then
+              mv cvc5/build/cvc5 cvc5/build/bin/cvc5
+              echo "Extracted production binary from artifacts/bin/cvc5.tar.gz"
+            else
+              echo "ERROR: Binary not found after extraction from artifacts/bin/cvc5.tar.gz"
+            fi
+          elif [ -f "artifacts/cvc5/build/bin/cvc5.tar.gz" ]; then
+            tar -xzf artifacts/cvc5/build/bin/cvc5.tar.gz -C cvc5/build --strip-components=1
+            if [ -f "cvc5/build/cvc5" ]; then
+              mv cvc5/build/cvc5 cvc5/build/bin/cvc5
+              echo "Extracted production binary from artifacts/cvc5/build/bin/cvc5.tar.gz"
+            else
+              echo "ERROR: Binary not found after extraction from artifacts/cvc5/build/bin/cvc5.tar.gz"
+            fi
           elif [ -f "artifacts/bin/cvc5" ]; then
-            # Binary might be uncompressed
             cp artifacts/bin/cvc5 cvc5/build/bin/cvc5
             chmod +x cvc5/build/bin/cvc5
             echo "Copied uncompressed binary from artifacts/bin/cvc5"

@@ -112,7 +112,7 @@ jobs:
             exit 1
           fi
       
-      - name: Compress binary and compile_commands.json with tar.gz
+      - name: Compress binary, compile_commands.json, and include headers with tar.gz
         working-directory: cvc5/build
         run: |
           # Create archive with binary and compile_commands.json
@@ -122,6 +122,13 @@ jobs:
             echo "compile_commands.json included"
           else
             echo "Warning: compile_commands.json not found"
+          fi
+          # Create archive with generated headers (needed for libclang parsing)
+          if [ -d "include" ]; then
+            tar -czf include.tar.gz include
+            echo "Generated headers (include/) included"
+          else
+            echo "Warning: include/ directory not found"
           fi
           COMPRESSED_SIZE=$(du -h bin/cvc5.tar.gz | cut -f1)
           echo "Compressed size: $COMPRESSED_SIZE"
@@ -133,6 +140,7 @@ jobs:
           path: |
             cvc5/build/bin/cvc5.tar.gz
             cvc5/build/compile_commands.json.tar.gz
+            cvc5/build/include.tar.gz
           retention-days: 7
           if-no-files-found: warn
       
@@ -203,7 +211,7 @@ jobs:
             exit 1
           fi
       
-      - name: Compress binary and compile_commands.json with tar.gz
+      - name: Compress binary, compile_commands.json, and include headers with tar.gz
         working-directory: cvc5/build
         run: |
           # Create archive with binary and compile_commands.json
@@ -213,6 +221,13 @@ jobs:
             echo "compile_commands.json included"
           else
             echo "Warning: compile_commands.json not found"
+          fi
+          # Create archive with generated headers (needed for libclang parsing)
+          if [ -d "include" ]; then
+            tar -czf include.tar.gz include
+            echo "Generated headers (include/) included"
+          else
+            echo "Warning: include/ directory not found"
           fi
           COMPRESSED_SIZE=$(du -h bin/cvc5.tar.gz | cut -f1)
           echo "Compressed size: $COMPRESSED_SIZE"
@@ -224,6 +239,7 @@ jobs:
           path: |
             cvc5/build/bin/cvc5.tar.gz
             cvc5/build/compile_commands.json.tar.gz
+            cvc5/build/include.tar.gz
           retention-days: 7
           if-no-files-found: warn
       
