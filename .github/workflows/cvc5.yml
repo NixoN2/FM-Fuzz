@@ -112,19 +112,29 @@ jobs:
             exit 1
           fi
       
-      - name: Compress binary with tar.gz
-        working-directory: cvc5/build/bin
+      - name: Compress binary and compile_commands.json with tar.gz
+        working-directory: cvc5/build
         run: |
-          tar -czf cvc5.tar.gz cvc5
-          COMPRESSED_SIZE=$(du -h cvc5.tar.gz | cut -f1)
+          # Create archive with binary and compile_commands.json
+          tar -czf bin/cvc5.tar.gz bin/cvc5
+          if [ -f "compile_commands.json" ]; then
+            tar -czf compile_commands.json.tar.gz compile_commands.json
+            echo "compile_commands.json included"
+          else
+            echo "Warning: compile_commands.json not found"
+          fi
+          COMPRESSED_SIZE=$(du -h bin/cvc5.tar.gz | cut -f1)
           echo "Compressed size: $COMPRESSED_SIZE"
       
       - name: Upload static binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: cvc5-${{ steps.get-commit.outputs.commit_hash }}
-          path: cvc5/build/bin/cvc5.tar.gz
+          path: |
+            cvc5/build/bin/cvc5.tar.gz
+            cvc5/build/compile_commands.json.tar.gz
           retention-days: 7
+          if-no-files-found: warn
       
       - name: Update last built SHA artifact
         run: |
@@ -193,19 +203,29 @@ jobs:
             exit 1
           fi
       
-      - name: Compress binary with tar.gz
-        working-directory: cvc5/build/bin
+      - name: Compress binary and compile_commands.json with tar.gz
+        working-directory: cvc5/build
         run: |
-          tar -czf cvc5.tar.gz cvc5
-          COMPRESSED_SIZE=$(du -h cvc5.tar.gz | cut -f1)
+          # Create archive with binary and compile_commands.json
+          tar -czf bin/cvc5.tar.gz bin/cvc5
+          if [ -f "compile_commands.json" ]; then
+            tar -czf compile_commands.json.tar.gz compile_commands.json
+            echo "compile_commands.json included"
+          else
+            echo "Warning: compile_commands.json not found"
+          fi
+          COMPRESSED_SIZE=$(du -h bin/cvc5.tar.gz | cut -f1)
           echo "Compressed size: $COMPRESSED_SIZE"
       
       - name: Upload static coverage binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: coverage-cvc5-${{ steps.get-commit.outputs.commit_hash }}
-          path: cvc5/build/bin/cvc5.tar.gz
+          path: |
+            cvc5/build/bin/cvc5.tar.gz
+            cvc5/build/compile_commands.json.tar.gz
           retention-days: 7
+          if-no-files-found: warn
       
       - name: Update last built SHA artifact
         run: |
