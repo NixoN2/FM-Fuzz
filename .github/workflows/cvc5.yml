@@ -6,8 +6,11 @@ on:
     - cron: '0 * * * *'  # Run every hour
 
 jobs:
-  check-and-build:
+  check-upstream:
     runs-on: ubuntu-latest
+    outputs:
+      build_needed: ${{ steps.check-upstream.outputs.build_needed }}
+      sha: ${{ steps.check-upstream.outputs.sha }}
     
     steps:
       - name: Checkout
@@ -35,11 +38,100 @@ jobs:
         with:
           path: .cache
           key: solver-cvc5-${{ steps.check-upstream.outputs.sha }}
+
+  build-static:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.build_needed == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
       
-      - name: Build and test CVC5
-        if: steps.check-upstream.outputs.build_needed == 'true'
-        run: ./scripts/cvc5/build.sh
+      - name: Build CVC5 static binary
+        run: ./scripts/cvc5/build.sh --static
       
+      - name: Get commit hash
+        id: get-commit
+        working-directory: cvc5
+        run: |
+          COMMIT_HASH=$(git rev-parse HEAD)
+          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+          echo "CVC5 commit hash: $COMMIT_HASH"
+      
+      - name: Measure binary size
+        working-directory: cvc5
+        run: |
+          if [ -f "./build/bin/cvc5" ]; then
+            BINARY_SIZE=$(du -h ./build/bin/cvc5 | cut -f1)
+            BINARY_SIZE_BYTES=$(stat -f%z ./build/bin/cvc5 2>/dev/null || stat -c%s ./build/bin/cvc5 2>/dev/null)
+            echo "Binary size: $BINARY_SIZE ($BINARY_SIZE_BYTES bytes)"
+            echo "binary_size=$BINARY_SIZE" >> $GITHUB_OUTPUT
+            echo "binary_size_bytes=$BINARY_SIZE_BYTES" >> $GITHUB_OUTPUT
+          else
+            echo "ERROR: Binary not found at ./build/bin/cvc5"
+            exit 1
+          fi
+      
+      - name: Upload static binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cvc5-${{ steps.get-commit.outputs.commit_hash }}
+          path: cvc5/build/bin/cvc5
+          retention-days: 7
+
+  build-static-coverage:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.build_needed == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      
+      - name: Clean any previous build
+        run: |
+          if [ -d "cvc5/build" ]; then
+            rm -rf cvc5/build
+            echo "Cleaned previous build directory"
+          fi
+      
+      - name: Build CVC5 static binary with coverage
+        run: ./scripts/cvc5/build.sh --static --coverage
+      
+      - name: Get commit hash
+        id: get-commit
+        working-directory: cvc5
+        run: |
+          COMMIT_HASH=$(git rev-parse HEAD)
+          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+          echo "CVC5 commit hash: $COMMIT_HASH"
+      
+      - name: Measure binary size
+        working-directory: cvc5
+        run: |
+          if [ -f "./build/bin/cvc5" ]; then
+            BINARY_SIZE=$(du -h ./build/bin/cvc5 | cut -f1)
+            BINARY_SIZE_BYTES=$(stat -f%z ./build/bin/cvc5 2>/dev/null || stat -c%s ./build/bin/cvc5 2>/dev/null)
+            echo "Binary size: $BINARY_SIZE ($BINARY_SIZE_BYTES bytes)"
+            echo "binary_size=$BINARY_SIZE" >> $GITHUB_OUTPUT
+            echo "binary_size_bytes=$BINARY_SIZE_BYTES" >> $GITHUB_OUTPUT
+          else
+            echo "ERROR: Binary not found at ./build/bin/cvc5"
+            exit 1
+          fi
+      
+      - name: Upload static coverage binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-cvc5-${{ steps.get-commit.outputs.commit_hash }}
+          path: cvc5/build/bin/cvc5
+          retention-days: 7
+
+  skip-build:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.build_needed == 'false'
+    runs-on: ubuntu-latest
+    steps:
       - name: Skip build (up to date)
-        if: steps.check-upstream.outputs.build_needed == 'false'
         run: echo "✅ CVC5 is up to date - skipping build"

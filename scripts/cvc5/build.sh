@@ -1,15 +1,29 @@
 #!/bin/bash
 # CVC5 Build and Test Script
 # This script clones, builds, and tests CVC5 following CI best practices
-# Usage: ./build.sh [--coverage]
+# Usage: ./build.sh [--coverage] [--static]
+#   --coverage: Enable coverage instrumentation
+#   --static: Build static binary
+#   --static --coverage: Build static binary with coverage
 
 set -e  # Exit on any error
 
 # Parse command line arguments
 ENABLE_COVERAGE=false
-if [[ "$1" == "--coverage" ]]; then
-    ENABLE_COVERAGE=true
+ENABLE_STATIC=false
+for arg in "$@"; do
+    if [[ "$arg" == "--coverage" ]]; then
+        ENABLE_COVERAGE=true
+    elif [[ "$arg" == "--static" ]]; then
+        ENABLE_STATIC=true
+    fi
+done
+
+if [[ "$ENABLE_COVERAGE" == "true" ]]; then
     echo "🔍 Coverage instrumentation will be enabled"
+fi
+if [[ "$ENABLE_STATIC" == "true" ]]; then
+    echo "📦 Static binary build will be enabled"
 fi
 
 echo "🔧 Installing basic tools..."
@@ -28,7 +42,7 @@ sudo apt-get install -y \
   libtinfo-dev \
   libfl-dev
 
-# Install coverage tools if coverage is enabled
+# Install coverage tools if coverage is enabled (standalone or with static)
 if [[ "$ENABLE_COVERAGE" == "true" ]]; then
     echo "📊 Installing coverage tools..."
     sudo apt-get install -y lcov gcc
@@ -56,8 +70,14 @@ python3 -m pip install --upgrade pip
 echo "🔨 Building CVC5..."
 cd cvc5
 
-# Configure build with or without coverage
-if [[ "$ENABLE_COVERAGE" == "true" ]]; then
+# Configure build based on flags
+if [[ "$ENABLE_STATIC" == "true" ]] && [[ "$ENABLE_COVERAGE" == "true" ]]; then
+    echo "📦 Configuring CVC5 for static binary with coverage..."
+    ./configure.sh debug --coverage --assertions --static --static-binary --auto-download
+elif [[ "$ENABLE_STATIC" == "true" ]]; then
+    echo "📦 Configuring CVC5 for static binary (production)..."
+    ./configure.sh production --static --static-binary --auto-download
+elif [[ "$ENABLE_COVERAGE" == "true" ]]; then
     echo "🔍 Configuring CVC5 with coverage instrumentation..."
     ./configure.sh debug --coverage --assertions --auto-download
 else
