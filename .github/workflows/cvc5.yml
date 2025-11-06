@@ -128,6 +128,18 @@ jobs:
           name: cvc5-${{ steps.get-commit.outputs.commit_hash }}
           path: cvc5/build/bin/cvc5.tar.gz
           retention-days: 7
+      
+      - name: Update last built SHA artifact
+        run: |
+          mkdir -p .cache
+          echo "${{ steps.get-commit.outputs.commit_hash }}" > .cache/cvc5_last_sha
+      
+      - name: Upload last built SHA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cvc5-last-sha
+          path: .cache/cvc5_last_sha
+          retention-days: 30
 
   build-static-coverage:
     needs: check-upstream
@@ -196,6 +208,18 @@ jobs:
           name: coverage-cvc5-${{ steps.get-commit.outputs.commit_hash }}
           path: cvc5/build/bin/cvc5.tar.gz
           retention-days: 7
+      
+      - name: Update last built SHA artifact
+        run: |
+          mkdir -p .cache
+          echo "${{ steps.get-commit.outputs.commit_hash }}" > .cache/cvc5_last_sha
+      
+      - name: Upload last built SHA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cvc5-last-sha
+          path: .cache/cvc5_last_sha
+          retention-days: 30
 
   skip-build:
     needs: check-upstream
