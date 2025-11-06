@@ -159,6 +159,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
       
+      - name: Install LLVM/Clang 17
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: '17'
+      
+      - name: Add LLVM to PATH
+        run: echo "${{ env.LLVM_PATH }}/bin" >> $GITHUB_PATH
+      
       - name: Clean any previous build
         run: |
           if [ -d "cvc5/build" ]; then
