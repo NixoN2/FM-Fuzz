@@ -1,975 +1,456 @@
 #!/usr/bin/env python3
 """
-Commit Coverage Analyzer
-Gets changed functions from a commit and finds tests that cover those functions.
+Commit Fuzzer with Arc Coverage Measurement
+Runs typefuzz on a test and measures arc (branch) coverage.
 """
 
-import json
-import sys
 import os
+import sys
+import json
 import subprocess
-from pathlib import Path
-from typing import Dict, List, Set, Optional
 import argparse
-import gc
-import git
-import re
-import difflib
-import ctypes
-from ctypes.util import find_library
-from os.path import normpath
-from dataclasses import dataclass
+import tempfile
+from pathlib import Path
+from typing import Dict, Optional, Tuple, List
 
-import clang.cindex
+# Number of cores to use for fastcov coverage extraction
+FASTCOV_JOBS = 4
 
-# Monkey-patch: expose template argument introspection via libclang C API if missing
-try:
-    libname = find_library('clang')
-    if libname:
-        _libclang = ctypes.CDLL(libname)
-
-        CXType = clang.cindex.CXType  # type: ignore
-
-        _libclang.clang_Type_getNumTemplateArguments.argtypes = [CXType]
-        _libclang.clang_Type_getNumTemplateArguments.restype = ctypes.c_int
-
-        _libclang.clang_Type_getTemplateArgumentAsType.argtypes = [CXType, ctypes.c_uint]
-        _libclang.clang_Type_getTemplateArgumentAsType.restype = CXType
-
-        def _get_num_template_arguments(t):
-            try:
-                return _libclang.clang_Type_getNumTemplateArguments(t._type)
-            except Exception:
-                return -1
-
-        def _get_template_argument_type(t, idx: int):
-            try:
-                cxt = _libclang.clang_Type_getTemplateArgumentAsType(t._type, ctypes.c_uint(idx))
-                if hasattr(clang.cindex, 'Type') and hasattr(clang.cindex.Type, 'from_result'):
-                    return clang.cindex.Type.from_result(cxt)  # type: ignore
-                return t
-            except Exception:
-                return t
-
-        if not hasattr(clang.cindex.Type, 'get_num_template_arguments'):
-            clang.cindex.Type.get_num_template_arguments = _get_num_template_arguments  # type: ignore
-        if not hasattr(clang.cindex.Type, 'get_template_argument_type'):
-            clang.cindex.Type.get_template_argument_type = _get_template_argument_type  # type: ignore
-except Exception:
-    pass
-
-@dataclass
-class FunctionInfo:
-    signature: str
-    start: int
-    end: int
-    file: str
-
-class GitHelper:
-    def __init__(self, repo_path: Path, repo: git.Repo):
-        self.repo_path = repo_path
-        self.repo = repo
-
-    def get_commit_info(self, commit_hash: str) -> Optional[Dict]:
-        try:
-            commit = self.repo.commit(commit_hash)
-            return {
-                'hash': commit.hexsha,
-                'author_name': commit.author.name,
-                'author_email': commit.author.email,
-                'date': commit.authored_datetime.isoformat(),
-                'message': commit.message.strip(),
-                'summary': commit.summary
-            }
-        except Exception as e:
-            print(f"Error getting commit info: {e}")
-            return None
-
-    def get_commit_diff(self, commit_hash: str) -> str:
-        try:
-            result = subprocess.run(['git', 'show', '-U0', '--no-color', commit_hash],
-                                    capture_output=True, text=True, cwd=self.repo_path)
-            return result.stdout
-        except Exception as e:
-            print(f"Error getting commit diff: {e}")
-            return ""
-
-    def get_changed_lines(self, diff_text: str) -> Dict[str, Set[int]]:
-        changed_lines: Dict[str, Set[int]] = {}
-        current_file: Optional[str] = None
-        in_hunk = False
-        new_line = None
-        for raw in diff_text.split('\n'):
-            if raw.startswith('diff --git '):
-                current_file = None
-                in_hunk = False
-                new_line = None
-                continue
-            if raw.startswith('+++ b/'):
-                current_file = raw[6:]
-                if current_file not in changed_lines:
-                    changed_lines[current_file] = set()
-                continue
-            if raw.startswith('@@ '):
-                m = re.search(r'@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@', raw)
-                if current_file and m:
-                    new_line = int(m.group(1))
-                    in_hunk = True
-                else:
-                    in_hunk = False
-                    new_line = None
-                continue
-            if not in_hunk or current_file is None or new_line is None:
-                continue
-            if raw.startswith('+') and not raw.startswith('+++'):
-                changed_lines[current_file].add(new_line)
-                new_line += 1
-            elif raw.startswith('-') and not raw.startswith('---'):
-                pass
-            else:
-                new_line += 1
-        return changed_lines
-
-    def get_file_text_at_commit(self, rev: Optional[str], path: str) -> Optional[str]:
-        if not rev:
-            return None
-        try:
-            result = subprocess.run(['git', 'show', f'{rev}:{path}'], capture_output=True, text=True, cwd=self.repo_path)
-            if result.returncode != 0:
-                return None
-            return result.stdout
-        except Exception:
-            return None
-
-class Matcher:
-    def __init__(self, coverage_map: Dict[str, Set[str]]):
-        self.coverage_map = coverage_map
-
-    def _strip_line_suffix(self, s: str) -> str:
-        if ':' in s:
-            base, last = s.rsplit(':', 1)
-            if last.isdigit():
-                return base
-        return s
-
-    def _split_path_and_sig(self, key: str):
-        no_line = self._strip_line_suffix(key)
-        if ':' in no_line:
-            path, sig = no_line.split(':', 1)
-            return path, sig
-        return '', no_line
-
-
-    def match(self, functions: List[str]) -> Dict:
-        cov_full_to_tests: Dict[str, Set[str]] = {}
-        cov_sig_to_tests: Dict[str, Set[str]] = {}
-        # Map normalized signature (without :line) to example full keys for debug
-        cov_sig_to_fulls: Dict[str, List[str]] = {}
-        for k, tests in self.coverage_map.items():
-            path, sig = self._split_path_and_sig(k)
-            full = f"{path}:{sig}"
-            cov_full_to_tests.setdefault(full, set()).update(tests)
-            cov_sig_to_tests.setdefault(sig, set()).update(tests)
-            # Store original mapping key (with :line) for debug visibility
-            cov_sig_to_fulls.setdefault(sig, []).append(k)
-        cov_sigs_list = list(cov_sig_to_tests.keys())
-
-        all_covering_tests = set()
-        functions_with_tests = 0
-        functions_without_tests = 0
-        function_test_counts: Dict[str, int] = {}
-        test_function_counts: Dict[str, int] = {}
-        direct_matches = 0
-        path_removed_matches = 0
-        function_matches: Dict[str, Dict] = {}
-        match_type_counts: Dict[str, int] = {}
-
-        for func in functions:
-            matching_tests = set()
-            match_type = "none"
-            our_path, our_sig = self._split_path_and_sig(func)
-            our_sig_norm = self._strip_line_suffix(our_sig)
-            our_full_norm = f"{our_path}:{our_sig_norm}"
-
-            if our_full_norm in cov_full_to_tests:
-                tests = cov_full_to_tests[our_full_norm]
-                matching_tests.update(tests)
-                direct_matches += 1
-                match_type = "direct"
-            elif our_sig_norm in cov_sig_to_tests:
-                tests = cov_sig_to_tests[our_sig_norm]
-                matching_tests.update(tests)
-                path_removed_matches += 1
-                match_type = "path_removed"
-                # Debug: show example mapping keys for this signature
-                try:
-                    examples = cov_sig_to_fulls.get(our_sig_norm, [])
-                    if examples:
-                        print(f"DEBUG_PATHLESS our={our_sig_norm} examples={examples}")
-                except Exception:
-                    pass
-            else:
-                try:
-                    best = max(
-                        ((cov_sig, difflib.SequenceMatcher(None, our_sig_norm, cov_sig).ratio()) for cov_sig in cov_sigs_list),
-                        key=lambda x: x[1],
-                        default=(None, 0.0)
-                    )
-                    best_sig, best_ratio = best
-                    if best_sig is not None and best_ratio >= 0.9:
-                        # Do NOT count fuzzy matches as coverage; only report candidates
-                        match_type = f"fuzzy_candidate:{best_ratio:.2f}"
-                        try:
-                            examples = cov_sig_to_fulls.get(best_sig, [])
-                            if examples:
-                                print(f"DEBUG_FUZZY_MAP our={our_sig_norm} matched_sig={best_sig} examples={examples}")
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-            if matching_tests:
-                all_covering_tests.update(matching_tests)
-                functions_with_tests += 1
-                function_test_counts[func] = len(matching_tests)
-                for test in matching_tests:
-                    test_function_counts[test] = test_function_counts.get(test, 0) + 1
-            else:
-                functions_without_tests += 1
-                function_test_counts[func] = 0
-
-            function_matches[func] = {
-                'tests': sorted(list(matching_tests)),
-                'match_type': match_type
-            }
-            match_type_counts[match_type] = match_type_counts.get(match_type, 0) + 1
-
-        return {
-            'all_covering_tests': all_covering_tests,
-            'functions_with_tests': functions_with_tests,
-            'functions_without_tests': functions_without_tests,
-            'total_tests': len(all_covering_tests),
-            'function_test_counts': function_test_counts,
-            'test_function_counts': test_function_counts,
-            'direct_matches': direct_matches,
-            'path_removed_matches': path_removed_matches,
-            'function_matches': function_matches,
-            'match_type_counts': match_type_counts
-        }
-
-class CommitAnalyzer:
-    def __init__(self, repo_path: str = ".", compile_commands: Optional[str] = None):
-        """Initialize with repository path."""
-        self.repo_path = Path(repo_path)
-        self.repo = git.Repo(repo_path)
-        self.coverage_map = None
-        self.compdb = None
-        self.compdb_dir: Optional[str] = None
-        self.git = GitHelper(self.repo_path, self.repo)
-        if compile_commands:
-            self._init_compilation_database(compile_commands)
-
-    def _init_compilation_database(self, compile_commands: str) -> None:
-        try:
-            cc_path = Path(compile_commands)
-            cc_dir = cc_path if cc_path.is_dir() else cc_path.parent
-            db = clang.cindex.CompilationDatabase.fromDirectory(str(cc_dir))  # type: ignore
-            # Probe database (may raise if not usable)
-            _ = db.getAllCompileCommands()  # type: ignore[attr-defined]
-            self.compdb = db
-            self.compdb_dir = str(cc_dir)
-        except Exception:
-            self.compdb = None
-            self.compdb_dir = None
-
-    def _extract_args_from_compile_command(self, cmd) -> List[str]:
-        args: List[str] = []
-        try:
-            # libclang API differences: use .arguments if present, else .commandLine
-            raw = list(getattr(cmd, 'arguments', None) or getattr(cmd, 'commandLine', []))
-            # Drop the compiler binary and the source file path
-            # Also drop output-related flags (-o, /Fo, etc.) and compile-only flags like -c
-            skip_next = False
-            src = str(getattr(cmd, 'filename', ''))
-            for i, a in enumerate(raw):
-                if skip_next:
-                    skip_next = False
-                    continue
-                if i == 0:
-                    continue
-                if a == src or a.endswith(src):
-                    continue
-                if a in ('-c',):
-                    continue
-                if a in ('-o', '/Fo'):
-                    skip_next = True
-                    continue
-                args.append(a)
-        except Exception:
-            return []
-        # Ensure language for headers
-        if '-x' not in args:
-            args = ['-x', 'c++'] + args
-        return args
-
-    def _get_clang_args_for_file(self, file_path: str) -> List[str]:
-        # Try compilation database
-        if self.compdb:
-            try:
-                abs_path = str((self.repo_path / file_path).resolve()) if not os.path.isabs(file_path) else file_path
-                cmds = self.compdb.getCompileCommands(abs_path)  # type: ignore
-                if cmds and len(cmds) > 0:
-                    # Pick first entry
-                    cc = cmds[0]
-                    args = self._extract_args_from_compile_command(cc)
-                    # Add resource dir if available
-                    crd = self._clang_resource_dir()
-                    if crd and '-resource-dir' not in args:
-                        args.extend(['-resource-dir', crd])
-                    return args
-            except Exception:
-                pass
-        # Fallback
-        return self._build_clang_args()
-
-    def _demangle_with_cxxfilt(self, mangled: Optional[str]) -> Optional[str]:
-        """Demangle a mangled C++ symbol using c++filt (binutils)."""
-        if not mangled:
-            return None
-        try:
-            res = subprocess.run(['c++filt'], input=str(mangled), capture_output=True, text=True)
-            if res.returncode == 0 and res.stdout:
-                return res.stdout.strip()
-        except Exception:
-            pass
-        return None
-    def get_function_signature(self, cursor) -> Optional[str]:
-        """Extract gcov-style function signature from a clang cursor"""
-        try:
-            # Prefer demangled signature from mangled name (matches coverage mapping formatting)
-            line = cursor.location.line
-            mangled = getattr(cursor, 'mangled_name', None)
-            demangled = self._demangle_with_cxxfilt(mangled)
-            if demangled:
-                # Use demangled signature as-is with line suffix
-                return f"{demangled}:{line}"
-
-            # Fallback to AST-rendered signature
-            name = cursor.spelling
-            if not name:
-                return None
-
-            qualified_name = self.get_qualified_name(cursor)
-            params = []
-            # Get parameters with template-aware rendering (best effort)
-            for child in cursor.get_children():
-                if child.kind == clang.cindex.CursorKind.PARM_DECL:
-                    params.append(self._render_param_type(child.type))
-
-            param_str = ", ".join(params)
-            const_suffix = " const" if cursor.is_const_method() else ""
-            
-            # Add ABI information if present (like [abi:cxx11])
-            abi_info = ""
-            if hasattr(cursor, 'mangled_name') and cursor.mangled_name:
-                # Check for ABI-specific mangling
-                if 'abi:cxx11' in str(cursor.mangled_name):
-                    abi_info = "[abi:cxx11]"
-            
-            line = cursor.location.line
-            signature = f"{qualified_name}({param_str}){abi_info}{const_suffix}:{line}"
-            # Normalize once to match coverage mapping formatting
-            return self._normalize_signature(signature)
-        except Exception:
-            return None
-
-    def _render_param_type(self, tp) -> str:
-        """Render parameter type with template arguments where possible using libclang APIs.
-        Falls back to canonical spelling.
-        """
-        try:
-            # Prefer named/elaborated named type for better spelling
-            try:
-                named = tp.get_named_type()
-                if named.spelling:
-                    tp = named
-            except Exception:
-                pass
-
-            # libclang python bindings may expose num_template_arguments
-            num_targs = getattr(tp, 'get_num_template_arguments', None)
-            get_targ = getattr(tp, 'get_template_argument_type', None)
-            if callable(num_targs) and callable(get_targ):
-                n = num_targs()
-                if isinstance(n, int) and n > 0:
-                    # Render base name
-                    base = tp.spelling or tp.get_canonical().spelling
-                    base = base.split('<', 1)[0].strip()
-                    # Collect arguments
-                    args: List[str] = []
-                    for i in range(n):
-                        try:
-                            at = get_targ(i)
-                            if at and (at.spelling or at.get_canonical().spelling):
-                                args.append(self._render_param_type(at))
-                        except Exception:
-                            pass
-                    if args:
-                        return f"{base}<{', '.join(args)}>"
-
-            # Prefer fully-qualified canonical for non-templates; fallback to spelling
-            can = tp.get_canonical().spelling or ''
-            sp = tp.spelling or ''
-            # If canonical shows namespaces or templates, prefer it
-            if '::' in can or '<' in can:
-                s = can
-            elif '::' in sp or '<' in sp:
-                s = sp
-            else:
-                # last resort
-                s = can or sp
-            s = (s or '').replace('  ', ' ').strip()
-            return s
-        except Exception:
-            try:
-                return tp.spelling or tp.get_canonical().spelling or ''
-            except Exception:
-                return ''
-
-
-    def _clang_resource_dir(self) -> Optional[str]:
-        """Try to get clang resource dir for proper builtin headers."""
-        try:
-            res = subprocess.run(['clang', '-print-resource-dir'], capture_output=True, text=True)
-            if res.returncode == 0:
-                d = res.stdout.strip()
-                if d and os.path.isdir(d):
-                    return d
-        except Exception:
-            pass
-        return None
-
+class CommitFuzzer:
+    def __init__(self, build_dir: str = "build", tests_root: str = "test/regress/cli"):
+        self.build_dir = Path(build_dir)
+        self.tests_root = Path(tests_root)
+        self.binary_path = self.build_dir / "bin" / "cvc5"
+        
+    def reset_coverage_counters(self):
+        """Reset coverage counters using fastcov --zerocounters for isolation"""
+        # Clear existing .gcda files before resetting (same as coverage_mapper.py)
+        for gcda in self.build_dir.rglob("*.gcda"):
+            gcda.unlink()
+        
+        # Reset coverage counters using fastcov (ignore errors, same as coverage_mapper.py)
+        subprocess.run([
+            "fastcov", "--zerocounters", "--search-directory", str(self.build_dir),
+            "--exclude", "/usr/include/*", "--exclude", "*/deps/*"
+        ], cwd=self.build_dir.parent, capture_output=True, text=True, check=False)
     
-    def get_qualified_name(self, cursor) -> str:
-        """Get the fully qualified name including namespace and class"""
-        parts = []
-        current = cursor
-        
-        while current:
-            if current.kind in [clang.cindex.CursorKind.NAMESPACE, 
-                              clang.cindex.CursorKind.CLASS_DECL,
-                              clang.cindex.CursorKind.STRUCT_DECL,
-                              clang.cindex.CursorKind.FUNCTION_DECL,
-                              clang.cindex.CursorKind.CXX_METHOD]:
-                name = current.spelling
-                if name and name not in parts:  # Avoid duplicates
-                    parts.append(name)
-            current = current.semantic_parent
-        
-        parts.reverse()
-        qualified_name = "::".join(parts)
-        
-        # Ensure we have the full cvc5:: namespace
-        if not qualified_name.startswith('cvc5::'):
-            # Try to find the actual namespace context
-            if 'cvc5::' in qualified_name:
-                # Extract everything from cvc5:: onwards
-                cvc5_index = qualified_name.find('cvc5::')
-                qualified_name = qualified_name[cvc5_index:]
-        
-        return qualified_name
-    
-    def is_cvc5_function(self, signature: str) -> bool:
-        """Check if a function signature belongs to cvc5.
-        Only consider the qualified function name (before '('), allow std types in parameters.
-        """
-        try:
-            head = signature.split('(')[0]
-            # If the function itself is in std or gnu namespaces, skip
-            if head.startswith('std::') or head.startswith('__') or head.startswith('__gnu_cxx::'):
-                return False
-            # Include any functions within the cvc5 namespace
-            if 'cvc5::' in head:
-                return True
-            # Fallback: if it has a namespace and isn't std/gnu, accept
-            if '::' in head:
-                ns = head.split('::', 1)[0]
-                if ns and ns != 'std' and not ns.startswith('__') and ns != '__gnu_cxx':
-                    return True
+    def run_typefuzz_single_iteration(self, input_file: Path, bugs_folder: Path, 
+                                      scratch_folder: Path, log_folder: Path) -> bool:
+        """Run typefuzz with exactly 1 iteration on the input file (seed or mutant)"""
+        if not input_file.exists():
+            print(f"Error: Input file not found: {input_file}")
             return False
-        except Exception:
-            return False
-    
-    def get_commit_functions(self, commit_hash: str) -> List[str]:
-        """Get changed C++ functions by intersecting diff ranges with AST extents.
-        Includes functions whose body overlaps changed lines or whose signature changed.
-        Excludes pure moves (identical normalized body before/after).
-        """
-        commit_info = self.git.get_commit_info(commit_hash)
-        if not commit_info:
-            return []
-
-        # Get diff and changed line ranges on the new side
-        diff_text = self.git.get_commit_diff(commit_hash)
-        changed_files_lines = self.git.get_changed_lines(diff_text)
-
-        # Parent commit (if any)
-        try:
-            commit = self.repo.commit(commit_hash)
-            parent_hash = commit.parents[0].hexsha if commit.parents else None
-        except Exception:
-            parent_hash = None
-
-        changed_functions: List[str] = []
-
-        for file_path, changed_lines in changed_files_lines.items():
-            # Only consider project sources under src/
-            if not (file_path.startswith('src/') and file_path.endswith(('.cpp', '.cc', '.c', '.h', '.hpp'))):
-                continue
-
-            after_src = self.git.get_file_text_at_commit(commit_hash, file_path)
-            if after_src is None:
-                continue
-            before_src = self.git.get_file_text_at_commit(parent_hash, file_path) if parent_hash else None
-
-            # Parse functions from in-memory contents
-            after_funcs = self.parse_functions_from_text(file_path, after_src)
-            before_funcs = self.parse_functions_from_text(file_path, before_src) if before_src is not None else []
-
-            # Build indexes for before
-            before_by_sig = {self.build_signature_key(f.signature): f for f in before_funcs}
-
-            # Helper to normalize function body slice
-            def normalized_body(src: str, f: FunctionInfo) -> str:
-                lines = src.splitlines()
-                s = max(1, int(f.start))
-                e = min(len(lines), int(f.end))
-                snippet = "\n".join(lines[s-1:e])
-                return self.normalize_code(snippet)
-
-            # Per changed line: select the innermost enclosing function (smallest extent)
-            selected: Dict[str, FunctionInfo] = {}
-            if after_funcs:
-                cvc5_funcs = [f for f in after_funcs if self.is_cvc5_function(f.signature)]
-                for ln in sorted(changed_lines):
-                    candidates = [f for f in cvc5_funcs if int(f.start) <= ln <= int(f.end)]
-                    if not candidates:
-                        continue
-                    # choose innermost by minimal extent length, then earliest start
-                    chosen = min(candidates, key=lambda f: (int(f.end) - int(f.start), int(f.start)))
-                    key = self.build_signature_key(chosen.signature)
-                    selected[key] = chosen
-
-            # Emit selected functions, dropping pure moves
-            for sig_key, f in selected.items():
-                # Exclude pure move if existed before and bodies equal
-                is_move = False
-                if before_src is not None and sig_key in before_by_sig:
-                    bf = before_by_sig[sig_key]
-                    if normalized_body(before_src, bf) == normalized_body(after_src, f):
-                        is_move = True
-                if is_move:
-                    continue
-                mapping_entry = f"{file_path}:{f.signature}"
-                changed_functions.append(mapping_entry)
-                print(f"    Selected: {mapping_entry} (overlap=True, sig_changed=False)")
-
-        return changed_functions
-
-    def parse_functions_from_text(self, file_path: str, source_text: Optional[str]) -> List[FunctionInfo]:
-        """Parse C++ function definitions from provided source text using libclang unsaved_files."""
-        if source_text is None:
-            return []
         
-        try:
-            index = clang.cindex.Index.create()
-            args = self._get_clang_args_for_file(file_path)
-            abs_path = str((self.repo_path / file_path).resolve()) if not os.path.isabs(file_path) else file_path
-            tu = index.parse(abs_path, args=args, unsaved_files=[(abs_path, source_text)])
-            try:
-                if tu.diagnostics:
-                    print(f"DEBUG_CLANG_TU_DIAG_COUNT: {len(tu.diagnostics)}")
-                    for diag in tu.diagnostics:
-                        print(f"DEBUG_CLANG_TU_DIAG: {diag.severity}: {diag.spelling}")
-            except Exception:
-                pass
-
-            funcs: List[FunctionInfo] = []
-
-            def visit(n):
-                if n.kind in [clang.cindex.CursorKind.FUNCTION_DECL, clang.cindex.CursorKind.CXX_METHOD] and n.is_definition():
-                    sig = self.get_function_signature(n)
-                    node_file = str(n.location.file) if n.location and n.location.file else None
-                    if sig and node_file and self.is_cvc5_function(sig):
-                        nf = normpath(node_file)
-                        exp = normpath(abs_path)
-                        if nf.endswith(exp):
-                            funcs.append(FunctionInfo(
-                                signature=sig,
-                                start=n.extent.start.line,
-                                end=n.extent.end.line,
-                                file=node_file
-                            ))
-                for c in n.get_children():
-                    visit(c)
-
-            visit(tu.cursor)
-            return funcs
-        except Exception:
-            return []
-
-    def build_signature_key(self, signature: str) -> str:
-        """Normalize a signature to a stable key (drop ':line')."""
-        if ':' in signature:
-            base, last = signature.rsplit(':', 1)
-            if last.isdigit():
-                return base
-        return signature
-
-    def normalize_code(self, code: str) -> str:
-        """Remove comments and collapse whitespace for rough body comparison."""
-        code = re.sub(r'//.*', '', code)
-        code = re.sub(r'/\*.*?\*/', '', code, flags=re.S)
-        code = re.sub(r'\s+', ' ', code).strip()
-        return code
-
-    def _normalize_signature(self, full_sig: str) -> str:
-        """Normalize a constructed signature string to match coverage mapping style, once.
-        Preserves trailing :line while normalizing whitespace, namespaces, template spacing,
-        and parameter const placement.
-        """
-        try:
-            # Split off :line suffix if present
-            line_part = ''
-            head = full_sig
-            if ':' in full_sig:
-                base, last = full_sig.rsplit(':', 1)
-                if last.isdigit():
-                    head = base
-                    line_part = f":{last}"
-
-            # Remove ABI tag
-            head = re.sub(r"\[abi:[^\]]+\]", "", head)
-            # Collapse namespace spacing
-            head = re.sub(r"\s*::\s*", "::", head)
-
-            # Find parameter list boundaries on the head (no :line now)
-            s = head
-            open_idx = -1
-            angle = 0
-            for i, ch in enumerate(s):
-                if ch == '<':
-                    angle += 1
-                elif ch == '>':
-                    angle = max(0, angle - 1)
-                elif ch == '(' and angle == 0:
-                    open_idx = i
-                    break
-            if open_idx == -1:
-                # No params? Just collapse spaces and template closers
-                s = re.sub(r"\s+", " ", s)
-                s = s.replace(">>", "> >")
-                return s.strip() + line_part
-
-            paren = 0
-            close_idx = -1
-            for j in range(open_idx, len(s)):
-                c = s[j]
-                if c == '<':
-                    angle += 1
-                elif c == '>':
-                    angle = max(0, angle - 1)
-                elif c == '(':
-                    paren += 1
-                elif c == ')':
-                    paren -= 1
-                    if paren == 0 and angle == 0:
-                        close_idx = j
-                        break
-            if close_idx == -1:
-                s = re.sub(r"\s+", " ", s)
-                s = s.replace(">>", "> >")
-                return s.strip() + line_part
-
-            prefix = s[:open_idx+1]
-            params_str = s[open_idx+1:close_idx]
-            suffix = s[close_idx:]
-
-            # Split top-level parameters
-            params: List[str] = []
-            buf: List[str] = []
-            angle = 0
-            paren = 0
-            for ch in params_str:
-                if ch == '<':
-                    angle += 1
-                elif ch == '>':
-                    angle = max(0, angle - 1)
-                elif ch == '(':
-                    paren += 1
-                elif ch == ')':
-                    paren = max(0, paren - 1)
-                if ch == ',' and angle == 0 and paren == 0:
-                    params.append(''.join(buf).strip())
-                    buf = []
-                else:
-                    buf.append(ch)
-            if buf:
-                params.append(''.join(buf).strip())
-
-            def norm_param(p: str) -> str:
-                p = re.sub(r"\s+", " ", p).strip()
-                # Drop trailing parameter identifiers if any sneaked in
-                p = re.sub(r"(\b[\w:<>*&\s]+?)\s+([A-Za-z_][A-Za-z0-9_]*)$", r"\1", p)
-                # Move leading 'const ' to trailing ' const'
-                leading_const = p.startswith('const ')
-                if leading_const:
-                    p = p[len('const '):].strip()
-                m2 = re.match(r'^(.*?)(\s*[&*]+)$', p)
-                if m2:
-                    base = m2.group(1).strip()
-                    syms = m2.group(2).replace(' ', '')
-                else:
-                    base = p
-                    syms = ''
-                if leading_const:
-                    p = f"{base} const{syms}"
-                else:
-                    p = f"{base}{syms}"
-                # Namespace spacing and pointer/ref spacing
-                p = re.sub(r"\s*::\s*", "::", p)
-                p = re.sub(r"\s+([&*])", r"\1", p)
-                p = re.sub(r"<\s*", "<", p)
-                # Ensure nested template closers have space
-                p = p.replace(">>", "> >")
-                return p
-
-            norm_params = [norm_param(p) for p in params if p != '']
-            norm_params_str = ', '.join(norm_params)
-            out = f"{prefix}{norm_params_str}{suffix}"
-            # Collapse whitespace and apply final normalizations
-            out = re.sub(r"\s+", " ", out)
-            out = re.sub(r"\s*::\s*", "::", out)
-            out = re.sub(r",\s*", ", ", out)
-            out = re.sub(r"\s+([&*])", r"\1", out)
-            out = out.replace(">>", "> >")
-            return out.strip() + line_part
-        except Exception:
-            return full_sig
-
-    def load_coverage_mapping(self, coverage_json_path: str):
-        with open(coverage_json_path, 'r') as f:
-            self.coverage_map = json.load(f)
-
-    def find_tests_for_functions(self, functions: List[str]) -> Dict:
-        """Find unique tests that cover the given functions."""
-        if not self.coverage_map:
-            print("Error: Coverage mapping not loaded")
-            return {
-                'all_covering_tests': set(),
-                'functions_with_tests': 0,
-                'functions_without_tests': 0,
-                'total_tests': 0,
-                'function_test_counts': {},
-                'test_function_counts': {},
-                'direct_matches': 0,
-                'path_removed_matches': 0
-            }
-        matcher = Matcher(self.coverage_map)
-        return matcher.match(functions)
-
-
-    def _get_comprehensive_system_includes(self) -> List[str]:
-        """Get system include paths using GCC 14 toolchain (simplified approach like workflow)."""
-        includes = []
+        # Ensure folders exist
+        bugs_folder.mkdir(parents=True, exist_ok=True)
+        scratch_folder.mkdir(parents=True, exist_ok=True)
+        log_folder.mkdir(parents=True, exist_ok=True)
         
-        # CRITICAL: Use the same approach as the workflow - just --gcc-toolchain=/usr
-        # This lets clang automatically find the correct include paths
-        includes.extend(['--gcc-toolchain=/usr'])
-        # Add clang resource directory if available (for built-in headers)
-        crd = self._clang_resource_dir()
-        if crd:
-            includes.extend(['-resource-dir', crd])
-        return includes
-
-
-    def _build_clang_args(self) -> List[str]:
-        """Build unified clang arguments for CVC5 parsing."""
-        args = [
-            # Force C++ mode for header files
-            '-x', 'c++',
-            # C++ standard
-            '-std=c++17',
-            '-gz=none',  # Disable debug section compression
-            # Include paths (critical for CVC5)
-            '-I./include',                    # Public headers
-            '-I./build/include',              # Generated headers
-            '-I./src/include',                # Internal headers
-            '-I./src/.',                      # Source directory
-            '-I./build/src',                  # Build source directory
-            '-isystem', './build/deps/include',  # Dependencies
-            
-            # CVC5-specific preprocessor definitions
-            '-DCVC5_ASSERTIONS',
-            '-DCVC5_DEBUG', 
-            '-DCVC5_STATISTICS_ON',
-            '-DCVC5_TRACING',
-            '-DCVC5_USE_POLY',
-            '-D__BUILDING_CVC5LIB',
-            '-Dcvc5_obj_EXPORTS',
-            
-            # Compiler flags used by CVC5
-            '-Wall',
-            '-Wsuggest-override',
-            '-Wnon-virtual-dtor', 
-            '-Wimplicit-fallthrough',
-            '-Wshadow',
-            '-fno-operator-names',
-            '-Wno-deprecated-declarations',
-            '-Wno-error=deprecated-declarations',
-            '-fPIC',
-            '-fvisibility=default',
-            
-            # Additional flags for better parsing
-            '-fparse-all-comments',
-            '-Wno-unknown-pragmas',
-            '-Wno-unused-parameter',
-            '-Wno-unused-variable',
-            '-Wno-unused-function'
+        # Build typefuzz command with 1 iteration
+        # Note: Flags must come before positional arguments (SOLVER_CLIS and PATH_TO_SEEDS)
+        # Use -m 1 to ensure every iteration is tested (default modulo is 2, which skips iteration 1)
+        cmd = [
+            "typefuzz",
+            "-i", "1",  # Single iteration
+            "--keep-mutants",  # KEEP MUTANTS - critical for chaining iterations
+            # "-q",  # Quiet mode
+            "--bugs", str(bugs_folder),
+            "--scratch", str(scratch_folder),
+            "--logfolder", str(log_folder),
+            "z3;./build/bin/cvc5",  # Positional: SOLVER_CLIS
+            str(input_file)  # Positional: PATH_TO_SEEDS
         ]
         
-        # Add unified system includes (avoiding conflicts and duplicates)
-        args.extend(self._get_comprehensive_system_includes())
+        try:
+            # Capture both stdout and stderr to see what's happening
+            result = subprocess.run(
+                cmd,
+                cwd=self.build_dir.parent,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False
+            )
+            
+            # Print typefuzz output if there's any (even in quiet mode, errors might show)
+            if result.stdout:
+                print(f"\n[typefuzz stdout]: {result.stdout[:300]}", file=sys.stderr)
+            if result.stderr:
+                print(f"\n[typefuzz stderr]: {result.stderr[:300]}", file=sys.stderr)
+            
+            # Check log files for mutation statistics
+            if log_folder.exists():
+                log_files = sorted(log_folder.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+                if log_files:
+                    latest_log = log_files[0]
+                    try:
+                        with open(latest_log, 'r', encoding='utf-8', errors='ignore') as f:
+                            log_content = f.read()
+                            # Extract key lines about mutations
+                            for line in log_content.split('\n'):
+                                line_lower = line.lower()
+                                if "finished generations:" in line_lower or "generation" in line_lower:
+                                    print(f"  [DEBUG] Log: {line.strip()[:200]}", file=sys.stderr)
+                                if "unsuccessful" in line_lower or "successful" in line_lower:
+                                    if "generation" in line_lower or "mutation" in line_lower:
+                                        print(f"  [DEBUG] Log: {line.strip()[:200]}", file=sys.stderr)
+                                if "mutant" in line_lower and ("saved" in line_lower or "created" in line_lower or "failed" in line_lower):
+                                    print(f"  [DEBUG] Log: {line.strip()[:200]}", file=sys.stderr)
+                    except Exception as e:
+                        print(f"  [DEBUG] Could not read log file {latest_log}: {e}", file=sys.stderr)
+            
+            if result.returncode != 0:
+                print(f"✗ typefuzz failed (exit code {result.returncode})", end=" ", flush=True)
+                if result.stderr:
+                    error_first_line = result.stderr.strip().split('\n')[0]
+                    if error_first_line:
+                        print(f"- {error_first_line[:100]}")
+                else:
+                    print("")
+            return result.returncode == 0
+        except FileNotFoundError:
+            print(f"✗ typefuzz command not found", file=sys.stderr)
+            return False
+        except Exception as e:
+            print(f"✗ Error running typefuzz: {e}", file=sys.stderr)
+            return False
+    
+    def find_latest_mutant(self, scratch_folder: Path) -> Optional[Path]:
+        """
+        Find the most recently modified .smt2 file in the scratch folder.
+        Note: typefuzz may store mutants in subdirectories, so we search recursively.
+        """
+        if not scratch_folder.exists():
+            print(f"  [DEBUG] Scratch folder does not exist: {scratch_folder}", file=sys.stderr)
+            return None
         
-        return args
+        # Search for .smt2 files recursively in scratch folder
+        mutants = list(scratch_folder.rglob("*.smt2"))
+        
+        if not mutants:
+            print(f"  [DEBUG] No .smt2 files found in {scratch_folder}", file=sys.stderr)
+            # List what files/directories are actually there for debugging
+            try:
+                all_items = list(scratch_folder.iterdir())
+                if all_items:
+                    print(f"  [DEBUG] Scratch folder contents: {[item.name for item in all_items[:10]]}", file=sys.stderr)
+                    # Also check subdirectories
+                    for item in all_items:
+                        if item.is_dir():
+                            sub_items = list(item.iterdir())
+                            if sub_items:
+                                print(f"  [DEBUG] Subdirectory {item.name} contents: {[sub.name for sub in sub_items[:5]]}", file=sys.stderr)
+                else:
+                    print(f"  [DEBUG] Scratch folder is empty", file=sys.stderr)
+            except Exception as e:
+                print(f"  [DEBUG] Error listing scratch folder: {e}", file=sys.stderr)
+            return None
+        
+        # Return the most recently modified file
+        latest = max(mutants, key=lambda p: p.stat().st_mtime)
+        print(f"  [DEBUG] Found {len(mutants)} mutant(s), latest: {latest.name}", file=sys.stderr)
+        return latest
+    
+    def cleanup_old_mutants(self, scratch_folder: Path, current_mutant: Path, keep_recent: int = 5):
+        """
+        Clean up old mutant files to avoid disk overflow.
+        Keeps the current mutant and the N most recent mutants, deletes the rest.
+        """
+        if not scratch_folder.exists():
+            return
+        
+        mutants = list(scratch_folder.rglob("*.smt2"))
+        if len(mutants) <= keep_recent:
+            return  # Not enough mutants to clean up
+        
+        # Sort by modification time (newest first)
+        mutants_sorted = sorted(mutants, key=lambda p: p.stat().st_mtime, reverse=True)
+        
+        # Keep current mutant and keep_recent most recent
+        to_keep = {current_mutant}
+        to_keep.update(mutants_sorted[:keep_recent])
+        
+        # Delete old mutants
+        deleted_count = 0
+        for mutant in mutants_sorted[keep_recent:]:
+            if mutant not in to_keep:
+                try:
+                    mutant.unlink()
+                    deleted_count += 1
+                except Exception:
+                    pass
+        
+        if deleted_count > 0:
+            print(f"  (cleaned up {deleted_count} old mutants)", end="", flush=True)
+    
+    def extract_coverage_data(self, output_file: Path, jobs: int = 1) -> Optional[Dict]:
+        """Extract coverage data using fastcov and return JSON data"""
+        # Run fastcov to generate coverage JSON
+        result = subprocess.run([
+            "fastcov", "--gcov", "gcov", "--search-directory", str(self.build_dir),
+            "--output", str(output_file),
+            "--exclude", "/usr/include/*",
+            "--exclude", "*/deps/*",
+            "--jobs", str(jobs)
+        ], cwd=self.build_dir.parent, capture_output=True, text=True, check=False)
+        
+        if result.returncode != 0:
+            print(f"Error running fastcov: {result.stderr}", file=sys.stderr)
+            return None
 
+        # Load and return the JSON data
+        try:
+            with open(output_file, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error parsing fastcov JSON: {e}", file=sys.stderr)
+            return None
+
+    def count_arcs_from_fastcov(self, coverage_data: Dict, cvc5_only: bool = True) -> Tuple[int, int]:
+        """
+        Count covered arcs and total arcs from fastcov JSON.
+        Returns: (covered_arcs, total_arcs)
+        
+        Note: fastcov reports branch coverage, which is equivalent to arc coverage.
+        Fastcov JSON structure: sources[file_path][line_number]['branches'] = [branch_info, ...]
+        """
+        covered_arcs = 0
+        total_arcs = 0
+        
+        if 'sources' not in coverage_data:
+            return 0, 0
+        
+        for file_path, file_data in coverage_data['sources'].items():
+            # Filter to cvc5 source files only
+            if cvc5_only and not self.is_cvc5_source_file(file_path):
+                continue
+            
+            # Fastcov stores branches per line number
+            # Also check for branches at root level (like functions are stored)
+            def count_branches(branches):
+                """Helper to count branches from various formats"""
+                local_covered = 0
+                local_total = 0
+                
+                if isinstance(branches, list):
+                    for branch in branches:
+                        local_total += 1
+                        if isinstance(branch, dict):
+                            count = branch.get('count', 0)
+                            if count > 0:
+                                local_covered += 1
+                        elif isinstance(branch, (int, float)) and branch > 0:
+                            local_covered += 1
+                elif isinstance(branches, dict):
+                    for branch_info in branches.values():
+                        local_total += 1
+                        if isinstance(branch_info, dict):
+                            count = branch_info.get('count', 0)
+                            if count > 0:
+                                local_covered += 1
+                        elif isinstance(branch_info, (int, float)) and branch_info > 0:
+                            local_covered += 1
+                
+                return local_covered, local_total
+            
+            if isinstance(file_data, dict):
+                # Check root level branches (like functions)
+                if '' in file_data and isinstance(file_data[''], dict):
+                    if 'branches' in file_data['']:
+                        cov, tot = count_branches(file_data['']['branches'])
+                        covered_arcs += cov
+                        total_arcs += tot
+                
+                # Check branches per line number
+                for line_num, line_data in file_data.items():
+                    if line_num == '':  # Already handled above
+                        continue
+                    if isinstance(line_data, dict) and 'branches' in line_data:
+                        cov, tot = count_branches(line_data['branches'])
+                        covered_arcs += cov
+                        total_arcs += tot
+        
+        return covered_arcs, total_arcs
     
-    def cleanup_coverage_mapping(self):
-        """Clean up coverage mapping from memory."""
-        self.coverage_map = None
-        gc.collect()
+    def is_cvc5_source_file(self, file_path: str) -> bool:
+        """Check if a file path belongs to the cvc5 project"""
+        has_src_dir = 'src/' in file_path
+        
+        excluded_patterns = [
+            '/usr/include/', '/usr/lib/', '/System/', '/Library/',
+            '/Applications/', '/opt/', '/deps/', '/build/deps/',
+            '/build/src/', '/build/', '/include/', '/lib/',
+            '/bin/', '/share/', 'CMakeFiles/', 'cmake/', 'Makefile'
+        ]
+        
+        has_excluded_pattern = any(exclude in file_path for exclude in excluded_patterns)
+        
+        return has_src_dir and not has_excluded_pattern
     
-    def analyze_commit_coverage(self, commit_hash: str, coverage_json_path: str) -> Dict:
-        """Complete analysis: get functions from commit and find covering tests."""
-        print(f"Analyzing commit {commit_hash}...")
+    
+    def run(self, test_name: str, timeout: Optional[int] = 300, iterations: int = 2147483647,
+            keep_mutants: int = 5):
+        """
+        Run fuzzer on a test with coverage recorded after each mutant.
+        Each mutant becomes the seed for the next iteration.
         
-        # Step 1: Get changed functions from commit
-        changed_functions = self.get_commit_functions(commit_hash)
+        Args:
+            test_name: Test file to start with
+            timeout: Total timeout in seconds (None = no timeout, run until iterations exhausted)
+            iterations: Maximum number of iterations to run
+            keep_mutants: Number of recent mutants to keep (for disk cleanup)
+        """
+        import time
         
-        if not changed_functions:
-            print("No functions found in commit")
-            return {
-                'commit': commit_hash,
-                'changed_functions': [],
-                'covering_tests': [],
-                'summary': {
-                    'total_functions': 0,
-                    'functions_with_tests': 0,
-                    'total_covering_tests': 0,
-                    'coverage_percentage': 0
-                }
-            }
+        test_path = self.tests_root / test_name
         
-        # Step 2: Load coverage mapping and find tests
-        self.load_coverage_mapping(coverage_json_path)
-        test_results = self.find_tests_for_functions(changed_functions)
+        if not test_path.exists():
+            print(f"Error: Test file not found: {test_path}")
+            sys.exit(1)
         
-        # Step 3: Clean up memory
-        self.cleanup_coverage_mapping()
+        print(f"Running fuzzer on: {test_name}")
+        print(f"Test path: {test_path}")
+        if timeout:
+            print(f"Total timeout: {timeout}s, Max iterations: {iterations}")
+        else:
+            print(f"No timeout, Max iterations: {iterations}")
         
-        # Step 4: Generate detailed statistics
-        summary = {
-            'total_functions': len(changed_functions),
-            'functions_with_tests': test_results['functions_with_tests'],
-            'functions_without_tests': test_results['functions_without_tests'],
-            'total_covering_tests': test_results['total_tests'],
-            'coverage_percentage': (test_results['functions_with_tests'] / len(changed_functions) * 100) if changed_functions else 0
-        }
-        
-        print(
-            f"Changed functions: {summary['total_functions']}; "
-            f"with coverage: {summary['functions_with_tests']}; "
-            f"without: {summary['functions_without_tests']}; "
-            f"unique tests: {summary['total_covering_tests']}; "
-            f"coverage: {summary['coverage_percentage']:.1f}%"
-        )
-        
-        # Output selected functions and match breakdown
-        print("\nFunctions selected from commit:")
-        for f in changed_functions:
-            mt = test_results.get('function_matches', {}).get(f, {}).get('match_type', 'none')
-            cnt = test_results.get('function_test_counts', {}).get(f, 0)
-            print(f"  {f} -> {mt} (tests={cnt})")
-        
-        mcounts = test_results.get('match_type_counts', {})
-        if mcounts:
-            print("\nMatch breakdown:")
-            for k in sorted(mcounts.keys()):
-                print(f"  {k}: {mcounts[k]}")
-        
-        return {
-            'commit': commit_hash,
-            'changed_functions': changed_functions,
-            'covering_tests': sorted(list(test_results['all_covering_tests'])),
-            'function_matches': test_results.get('function_matches', {}),
-            'match_type_counts': test_results.get('match_type_counts', {}),
-            'summary': summary
-        }
+        # Create temporary directories for isolation
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            bugs_folder = temp_path / "bugs"
+            scratch_folder = temp_path / "scratch"
+            log_folder = temp_path / "logs"
+            
+            # Step 1: Run typefuzz iteratively, using each mutant as input for next iteration
+            print(f"\n[1/1] Running typefuzz with coverage recording after each mutant...")
+            print("="*60)
+            
+            coverage_samples: List[Tuple[int, int, float]] = []  # (iteration, arcs, elapsed_time)
+            start_time = time.time()
+            
+            # Start with the original test file for iteration 1
+            # Subsequent iterations will use mutants from scratch folder
+            current_input = test_path
+            
+            # Run iterations one at a time
+            for iteration in range(1, iterations + 1):
+                # Check total timeout (if set)
+                if timeout:
+                    elapsed_total = time.time() - start_time
+                    if elapsed_total >= timeout:
+                        print(f"\nTotal timeout ({timeout}s) reached at iteration {iteration}")
+                        break
+                
+                # For iteration 1: use original seed from test/regress/cli
+                # For iteration 2+: use mutant from scratch folder
+                if iteration == 1:
+                    current_input = test_path
+                    print(f"Iteration {iteration}/{iterations} (seed: {test_name})...", end=" ", flush=True)
+                else:
+                    # Find the latest mutant from previous iteration
+                    latest_mutant = self.find_latest_mutant(scratch_folder)
+                    if not latest_mutant:
+                        print(f"\n✗ No mutant found after iteration {iteration-1}, stopping")
+                        break
+                    current_input = latest_mutant
+                    print(f"Iteration {iteration}/{iterations} (mutant: {latest_mutant.name})...", end=" ", flush=True)
+                    
+                    # Clean up old mutants (keep only recent ones)
+                    if iteration > 2:  # Don't clean up on first two iterations
+                        self.cleanup_old_mutants(scratch_folder, latest_mutant, keep_mutants)
+                
+                # Reset coverage BEFORE each iteration to measure coverage from this iteration only
+                # This ensures we measure coverage from the current mutant/test, not accumulated
+                self.reset_coverage_counters()
+                
+                # Run single iteration on current input (seed or previous mutant)
+                success = self.run_typefuzz_single_iteration(
+                    current_input, bugs_folder, scratch_folder, log_folder
+                )
+                
+                if not success:
+                    print("✗ typefuzz failed, stopping")
+                    break
+                
+                # Record coverage after this iteration
+                fastcov_temp = temp_path / f"coverage_iter_{iteration}.json"
+                coverage_data = self.extract_coverage_data(fastcov_temp, jobs=FASTCOV_JOBS)
+                
+                elapsed_total = time.time() - start_time if timeout else 0
+                
+                if coverage_data:
+                    covered_arcs, _ = self.count_arcs_from_fastcov(coverage_data)
+                    coverage_samples.append((iteration, covered_arcs, elapsed_total))
+                    time_str = f" (total: {elapsed_total:.1f}s)" if timeout else ""
+                    print(f"✓ Arcs: {covered_arcs:,}{time_str}")
+                    sys.stdout.flush()
+                else:
+                    print("✗ Failed to extract coverage")
+                    sys.stdout.flush()
+                
+                # Clean up temp coverage file
+                try:
+                    fastcov_temp.unlink()
+                except:
+                    pass
+                
+                # Check if we've exceeded total timeout (if set)
+                if timeout:
+                    elapsed_total = time.time() - start_time
+                    if elapsed_total >= timeout:
+                        print(f"\nTotal timeout ({timeout}s) reached")
+                        break
+            
+            print("="*60)
+            
+            # Report results
+            if coverage_samples:
+                print("\n" + "="*60)
+                print("ARC COVERAGE RESULTS")
+                print("="*60)
+                final_arcs = coverage_samples[-1][1]
+                print(f"Final arcs covered: {final_arcs:,}")
+                
+                print(f"\nCoverage after each mutant (total {len(coverage_samples)} iterations):")
+                print(f"{'Iter':<8} {'Arcs':<12} {'Time (s)':<12} {'New Arcs':<12}")
+                print("-" * 48)
+                prev_arcs = 0
+                for iter_num, arcs, elapsed in coverage_samples:
+                    new_arcs = arcs - prev_arcs
+                    print(f"{iter_num:<8} {arcs:<12,} {elapsed:<12.1f} {new_arcs:<12,}")
+                    prev_arcs = arcs
+                print("="*60)
+            else:
+                print("\nNo coverage samples recorded")
     
 
 def main():
-    parser = argparse.ArgumentParser(description='Analyze commit coverage using coverage mapping')
-    parser.add_argument('commit', help='Commit hash to analyze')
-    parser.add_argument('--coverage-json', default='coverage_mapping.json', 
-                       help='Path to coverage mapping JSON file')
-    parser.add_argument('--compile-commands', default=None,
-                       help='Path to compile_commands.json or its directory (for Clang args)')
-    parser.add_argument('--output-matrix', help='Output matrix to JSON file instead of console')
+    parser = argparse.ArgumentParser(
+        description='Run typefuzz on a test and measure arc coverage'
+    )
+    parser.add_argument('test', help='Test name (relative to tests-root)')
+    parser.add_argument('--build-dir', default='build', help='Build directory (default: build)')
+    parser.add_argument('--tests-root', default='test/regress/cli', 
+                       help='Root directory for tests (default: test/regress/cli)')
+    parser.add_argument('--timeout', type=int, default=300,
+                       help='Total timeout for all fuzzing in seconds. Use 0 for no timeout (default: 300)')
+    parser.add_argument('-i', '--iterations', type=int, default=2147483647,
+                       help='Maximum number of iterations (mutants) to generate (default: 2147483647)')
+    parser.add_argument('--keep-mutants', type=int, default=5,
+                       help='Number of recent mutants to keep on disk (default: 5)')
     
     args = parser.parse_args()
     
-    # Check if coverage JSON exists
-    if not os.path.exists(args.coverage_json):
-        print(f"Error: Coverage JSON file not found: {args.coverage_json}")
-        sys.exit(1)
-    
-    # Initialize analyzer
-    analyzer = CommitAnalyzer(".", compile_commands=args.compile_commands)
-    
-    # Analyze commit coverage
-    result = analyzer.analyze_commit_coverage(args.commit, args.coverage_json)
-    
-    # Get unique tests
-    unique_tests = sorted(list(set(result['covering_tests'])))
-    
-    # Always output summary (only once)
-    print(f"Changed functions: {result['summary']['total_functions']}; "
-          f"with coverage: {result['summary']['functions_with_tests']}; "
-          f"without: {result['summary']['functions_without_tests']}; "
-          f"unique tests: {result['summary']['total_covering_tests']}; "
-          f"coverage: {result['summary']['coverage_percentage']:.1f}%")
-    
-    if args.output_matrix:
-        # Output matrix to JSON file
-        jobs = []
-        for i, test in enumerate(unique_tests):
-            jobs.append({
-                'job_id': i,
-                'test': test
-            })
-        
-        matrix_data = {
-            'matrix': {'include': jobs},
-            'total_tests': len(unique_tests),
-            'total_jobs': len(jobs)
-        }
-        
-        with open(args.output_matrix, 'w') as f:
-            json.dump(matrix_data, f, indent=2)
-        
-        print(f"Matrix written to {args.output_matrix} with {len(unique_tests)} tests")
-    
-    return 0
+    fuzzer = CommitFuzzer(build_dir=args.build_dir, tests_root=args.tests_root)
+    fuzzer.run(
+        test_name=args.test,
+        timeout=args.timeout if args.timeout > 0 else None,
+        iterations=args.iterations,
+        keep_mutants=args.keep_mutants
+    )
+
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
+

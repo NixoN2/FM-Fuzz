@@ -16,11 +16,11 @@ jobs:
     outputs:
       build_needed: ${{ steps.set-outputs.outputs.build_needed }}
       sha: ${{ steps.set-outputs.outputs.sha }}
-
+    
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-
+      
       - name: Download last built SHA from artifacts
         if: inputs.cvc5_commit_hash == ''
         uses: dawidd6/action-download-artifact@v6
@@ -31,7 +31,7 @@ jobs:
           path: .cache
           github_token: ${{ secrets.GITHUB_TOKEN }}
           workflow: cvc5.yml
-
+      
       - name: Check upstream or use provided commit
         id: set-outputs
         run: |
@@ -47,7 +47,7 @@ jobs:
             echo "build_needed=$(cat .build_status | grep build_needed | cut -d'=' -f2)" >> $GITHUB_OUTPUT
             echo "sha=$(cat .build_status | grep sha | cut -d'=' -f2)" >> $GITHUB_OUTPUT
           fi
-
+      
       - name: Upload last built SHA artifact (keep fresh when no build needed)
         if: inputs.cvc5_commit_hash == '' && steps.set-outputs.outputs.build_needed == 'false'
         run: |
@@ -55,7 +55,7 @@ jobs:
           if [ ! -f ".cache/cvc5_last_sha" ]; then
             echo "${{ steps.set-outputs.outputs.sha }}" > .cache/cvc5_last_sha
           fi
-
+      
       - name: Upload last built SHA artifact
         if: inputs.cvc5_commit_hash == '' && steps.set-outputs.outputs.build_needed == 'false'
         uses: actions/upload-artifact@v4
@@ -69,11 +69,11 @@ jobs:
     needs: check-upstream
     if: needs.check-upstream.outputs.build_needed == 'true'
     runs-on: ubuntu-latest
-
+    
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-
+      
       - name: Prepare CVC5 for specific commit
         if: inputs.cvc5_commit_hash != ''
         run: |
@@ -86,10 +86,10 @@ jobs:
           git checkout ${{ inputs.cvc5_commit_hash }}
           echo "Checked out commit: $(git rev-parse HEAD)"
           cd ..
-
+      
       - name: Build CVC5 static binary
         run: ./scripts/cvc5/build.sh --static
-
+      
       - name: Get commit hash
         id: get-commit
         working-directory: cvc5
@@ -97,7 +97,7 @@ jobs:
           COMMIT_HASH=$(git rev-parse HEAD)
           echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
           echo "CVC5 commit hash: $COMMIT_HASH"
-
+      
       - name: Measure binary size
         working-directory: cvc5
         run: |
@@ -111,29 +111,27 @@ jobs:
             echo "ERROR: Binary not found at ./build/bin/cvc5"
             exit 1
           fi
-
+      
       - name: Compress binary with tar.gz
         working-directory: cvc5/build/bin
         run: |
           tar -czf cvc5.tar.gz cvc5
           COMPRESSED_SIZE=$(du -h cvc5.tar.gz | cut -f1)
           echo "Compressed size: $COMPRESSED_SIZE"
-
+      
       - name: Upload static binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: cvc5-${{ steps.get-commit.outputs.commit_hash }}
           path: cvc5/build/bin/cvc5.tar.gz
           retention-days: 7
-
+      
       - name: Update last built SHA artifact
-        if: inputs.cvc5_commit_hash == ''
         run: |
           mkdir -p .cache
           echo "${{ steps.get-commit.outputs.commit_hash }}" > .cache/cvc5_last_sha
-
+      
       - name: Upload last built SHA artifact
-        if: inputs.cvc5_commit_hash == ''
         uses: actions/upload-artifact@v4
         with:
           name: cvc5-last-sha
@@ -145,18 +143,18 @@ jobs:
     needs: check-upstream
     if: needs.check-upstream.outputs.build_needed == 'true'
     runs-on: ubuntu-latest
-
+    
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-
+      
       - name: Clean any previous build
         run: |
           if [ -d "cvc5/build" ]; then
             rm -rf cvc5/build
             echo "Cleaned previous build directory"
           fi
-
+      
       - name: Prepare CVC5 for specific commit
         if: inputs.cvc5_commit_hash != ''
         run: |
@@ -169,10 +167,10 @@ jobs:
           git checkout ${{ inputs.cvc5_commit_hash }}
           echo "Checked out commit: $(git rev-parse HEAD)"
           cd ..
-
+      
       - name: Build CVC5 static binary with coverage
         run: ./scripts/cvc5/build.sh --static --coverage
-
+      
       - name: Get commit hash
         id: get-commit
         working-directory: cvc5
@@ -180,7 +178,7 @@ jobs:
           COMMIT_HASH=$(git rev-parse HEAD)
           echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
           echo "CVC5 commit hash: $COMMIT_HASH"
-
+      
       - name: Measure binary size
         working-directory: cvc5
         run: |
@@ -194,29 +192,27 @@ jobs:
             echo "ERROR: Binary not found at ./build/bin/cvc5"
             exit 1
           fi
-
+      
       - name: Compress binary with tar.gz
         working-directory: cvc5/build/bin
         run: |
           tar -czf cvc5.tar.gz cvc5
           COMPRESSED_SIZE=$(du -h cvc5.tar.gz | cut -f1)
           echo "Compressed size: $COMPRESSED_SIZE"
-
+      
       - name: Upload static coverage binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: coverage-cvc5-${{ steps.get-commit.outputs.commit_hash }}
           path: cvc5/build/bin/cvc5.tar.gz
           retention-days: 7
-
+      
       - name: Update last built SHA artifact
-        if: inputs.cvc5_commit_hash == ''
         run: |
           mkdir -p .cache
           echo "${{ steps.get-commit.outputs.commit_hash }}" > .cache/cvc5_last_sha
-
+      
       - name: Upload last built SHA artifact
-        if: inputs.cvc5_commit_hash == ''
         uses: actions/upload-artifact@v4
         with:
           name: cvc5-last-sha
