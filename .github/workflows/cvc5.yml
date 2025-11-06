@@ -16,6 +16,7 @@ jobs:
     outputs:
       build_needed: ${{ steps.set-outputs.outputs.build_needed }}
       sha: ${{ steps.set-outputs.outputs.sha }}
+      is_manual_build: ${{ steps.set-outputs.outputs.is_manual_build }}
     
     steps:
       - name: Checkout
@@ -39,6 +40,7 @@ jobs:
             echo "🔨 Building provided commit hash: ${{ inputs.cvc5_commit_hash }}"
             echo "build_needed=true" >> $GITHUB_OUTPUT
             echo "sha=${{ inputs.cvc5_commit_hash }}" >> $GITHUB_OUTPUT
+            echo "is_manual_build=true" >> $GITHUB_OUTPUT
           else
             echo "📥 Checking for upstream changes..."
             # Ensure .cache directory exists
@@ -46,6 +48,7 @@ jobs:
             ./scripts/check-upstream.sh cvc5 https://github.com/cvc5/cvc5.git
             echo "build_needed=$(cat .build_status | grep build_needed | cut -d'=' -f2)" >> $GITHUB_OUTPUT
             echo "sha=$(cat .build_status | grep sha | cut -d'=' -f2)" >> $GITHUB_OUTPUT
+            echo "is_manual_build=false" >> $GITHUB_OUTPUT
           fi
       
       - name: Upload last built SHA artifact (keep fresh when no build needed)
@@ -112,44 +115,34 @@ jobs:
             exit 1
           fi
       
-      - name: Compress binary, compile_commands.json, and include headers with tar.gz
-        working-directory: cvc5/build
+      - name: Collect build artifacts (headers, binary, compile_commands)
         run: |
-          # Create archive with binary and compile_commands.json
-          tar -czf bin/cvc5.tar.gz bin/cvc5
-          if [ -f "compile_commands.json" ]; then
-            tar -czf compile_commands.json.tar.gz compile_commands.json
-            echo "compile_commands.json included"
-          else
-            echo "Warning: compile_commands.json not found"
-          fi
-          # Create archive with generated headers (needed for libclang parsing)
-          if [ -d "include" ]; then
-            tar -czf include.tar.gz include
-            echo "Generated headers (include/) included"
-          else
-            echo "Warning: include/ directory not found"
-          fi
-          COMPRESSED_SIZE=$(du -h bin/cvc5.tar.gz | cut -f1)
+          ./scripts/cvc5/collect_build_artifacts.sh cvc5/build .artifacts
+      
+      - name: Compress collected artifacts
+        run: |
+          cd .artifacts
+          tar -czf ../cvc5/build/artifacts.tar.gz .
+          cd ..
+          COMPRESSED_SIZE=$(du -h cvc5/build/artifacts.tar.gz | cut -f1)
           echo "Compressed size: $COMPRESSED_SIZE"
       
       - name: Upload static binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: cvc5-${{ steps.get-commit.outputs.commit_hash }}
-          path: |
-            cvc5/build/bin/cvc5.tar.gz
-            cvc5/build/compile_commands.json.tar.gz
-            cvc5/build/include.tar.gz
+          path: cvc5/build/artifacts.tar.gz
           retention-days: 7
           if-no-files-found: warn
       
       - name: Update last built SHA artifact
+        if: needs.check-upstream.outputs.is_manual_build != 'true'
         run: |
           mkdir -p .cache
           echo "${{ steps.get-commit.outputs.commit_hash }}" > .cache/cvc5_last_sha
       
       - name: Upload last built SHA artifact
+        if: needs.check-upstream.outputs.is_manual_build != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: cvc5-last-sha
@@ -211,44 +204,34 @@ jobs:
             exit 1
           fi
       
-      - name: Compress binary, compile_commands.json, and include headers with tar.gz
-        working-directory: cvc5/build
+      - name: Collect build artifacts (headers, binary, compile_commands)
         run: |
-          # Create archive with binary and compile_commands.json
-          tar -czf bin/cvc5.tar.gz bin/cvc5
-          if [ -f "compile_commands.json" ]; then
-            tar -czf compile_commands.json.tar.gz compile_commands.json
-            echo "compile_commands.json included"
-          else
-            echo "Warning: compile_commands.json not found"
-          fi
-          # Create archive with generated headers (needed for libclang parsing)
-          if [ -d "include" ]; then
-            tar -czf include.tar.gz include
-            echo "Generated headers (include/) included"
-          else
-            echo "Warning: include/ directory not found"
-          fi
-          COMPRESSED_SIZE=$(du -h bin/cvc5.tar.gz | cut -f1)
+          ./scripts/cvc5/collect_build_artifacts.sh cvc5/build .artifacts
+      
+      - name: Compress collected artifacts
+        run: |
+          cd .artifacts
+          tar -czf ../cvc5/build/artifacts.tar.gz .
+          cd ..
+          COMPRESSED_SIZE=$(du -h cvc5/build/artifacts.tar.gz | cut -f1)
           echo "Compressed size: $COMPRESSED_SIZE"
       
       - name: Upload static coverage binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: coverage-cvc5-${{ steps.get-commit.outputs.commit_hash }}
-          path: |
-            cvc5/build/bin/cvc5.tar.gz
-            cvc5/build/compile_commands.json.tar.gz
-            cvc5/build/include.tar.gz
+          path: cvc5/build/artifacts.tar.gz
           retention-days: 7
           if-no-files-found: warn
       
       - name: Update last built SHA artifact
+        if: needs.check-upstream.outputs.is_manual_build != 'true'
         run: |
           mkdir -p .cache
           echo "${{ steps.get-commit.outputs.commit_hash }}" > .cache/cvc5_last_sha
       
       - name: Upload last built SHA artifact
+        if: needs.check-upstream.outputs.is_manual_build != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: cvc5-last-sha
