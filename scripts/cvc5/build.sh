@@ -60,7 +60,11 @@ if [[ "$ENABLE_COVERAGE" == "true" ]]; then
 fi
 
 echo "📥 Cloning CVC5 repository..."
-git clone https://github.com/cvc5/cvc5.git cvc5
+if [ -d "cvc5" ]; then
+    echo "⚠️  CVC5 directory already exists, skipping clone"
+else
+    git clone https://github.com/cvc5/cvc5.git cvc5
+fi
 
 echo "🔧 Setting up Python environment..."
 python3 -m venv ~/.venv
