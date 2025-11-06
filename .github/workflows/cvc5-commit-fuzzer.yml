@@ -6,6 +6,10 @@ on:
 jobs:
   commit-fuzzer:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.extract-tests.outputs.matrix }}
+      total_tests: ${{ steps.extract-tests.outputs.total_tests }}
+      total_jobs: ${{ steps.extract-tests.outputs.total_jobs }}
     permissions:
       actions: read
       contents: read
@@ -74,11 +78,25 @@ jobs:
         working-directory: cvc5
         env:
           SKIP_COVERAGE_ENFORCEMENT: "true"
+          MAX_JOBS: 10
         run: |
           # Run commit fuzzer with matrix output (1 commit instead of 50)
-          ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/run_commit_fuzzer.sh 1 ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/commit_fuzzer.py ../coverage_mapping.json build --output-matrix fuzzer_matrix.json
+          # Start with 10 jobs max (for testing)
+          # Tests per job is calculated dynamically to fit within MAX_JOBS
+          # To scale: change MAX_JOBS to 200+ (will automatically adjust tests_per_job)
+          ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/run_prepare_commit_fuzzer.sh \
+            --python-script ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/prepare_commit_fuzzer.py \
+            --coverage-file ../coverage_mapping.json \
+            --compile-commands build \
+            --output-matrix fuzzer_matrix.json \
+            --max-jobs $MAX_JOBS \
+            1
           
           if [ ! -f "fuzzer_matrix.json" ]; then
+            echo "No matrix file created, setting empty outputs"
+            echo "matrix={\"include\":[]}" >> $GITHUB_OUTPUT
+            echo "total_tests=0" >> $GITHUB_OUTPUT
+            echo "total_jobs=0" >> $GITHUB_OUTPUT
             echo "No matrix file created, ending job"
             exit 0
           fi
@@ -96,7 +114,7 @@ jobs:
 
   fuzzer-jobs:
     needs: commit-fuzzer
-    if: needs.commit-fuzzer.outputs.total_tests > 0
+    if: needs.commit-fuzzer.result == 'success' && needs.commit-fuzzer.outputs.total_tests != '' && needs.commit-fuzzer.outputs.total_tests != '0'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -106,34 +124,68 @@ jobs:
       contents: read
     
     steps:
+      - name: Record job start time
+        run: echo "$(date +%s)" > /tmp/job_start_${GITHUB_RUN_ID}_${{ matrix.job_id }}.txt
+      
       - name: Checkout
         uses: actions/checkout@v5
       
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 \
+            python3-pip \
+            unzip \
+            wget
+
       - name: Install fuzzing dependencies
         run: |
-          pip install yinyang
+          pip install antlr4-python3-runtime==4.9.2
           pip install z3-solver
+          pip install psutil
+          git clone https://github.com/testsmt/yinyang.git
+          cd yinyang
+          pip install -e .
+
+      - name: Download solver binaries
+        run: |
+          mkdir -p ${{ github.workspace }}/solvers
+          
+          # Download cvc4-1.6
+          wget -q https://cvc4.cs.stanford.edu/downloads/builds/x86_64-linux-opt/cvc4-1.6-x86_64-linux-opt \
+            -O ${{ github.workspace }}/solvers/cvc4-1.6
+          chmod +x ${{ github.workspace }}/solvers/cvc4-1.6
+          
+          # Download z3-4.8.7
+          wget -q https://github.com/Z3Prover/z3/releases/download/z3-4.8.7/z3-4.8.7-x64-ubuntu-16.04.zip -O /tmp/z3.zip
+          unzip -q /tmp/z3.zip -d /tmp
+          cp /tmp/z3-4.8.7-x64-ubuntu-16.04/bin/z3 ${{ github.workspace }}/solvers/z3-4.8.7
+          cp /tmp/z3-4.8.7-x64-ubuntu-16.04/bin/libz3.so ${{ github.workspace }}/solvers/
+          chmod +x ${{ github.workspace }}/solvers/z3-4.8.7
+          rm -rf /tmp/z3.zip /tmp/z3-4.8.7-x64-ubuntu-16.04
 
       - name: Build cvc5
         run: |
-          ./scripts/cvc5/build.sh --coverage
+          ./scripts/cvc5/build.sh
 
-      - name: Run Fuzzer on assigned test
+      - name: Verify solver binaries
+        run: |
+          ${{ github.workspace }}/solvers/cvc4-1.6 --version
+          ${{ github.workspace }}/solvers/z3-4.8.7 --version
+          z3 --version
+
+      - name: Run Simple Fuzzer on assigned tests
         working-directory: cvc5
         run: |
-          echo "Job ID: ${{ matrix.job_id }}"
-          echo "Assigned test: ${{ matrix.test }}"
-          
-          # Build full path: cvc5/test/regress/cli/ + test_path
-          full_test_path="test/regress/cli/${{ matrix.test }}"
-          
-          if [ -f "$full_test_path" ]; then
-            echo "Found test file: $full_test_path"
-            
-            # Run typefuzz for 5 minutes (300 seconds)
-            timeout 300 typefuzz "z3;./build/bin/cvc5" "$full_test_path" || {
-              echo "Fuzzing completed or timed out for ${{ matrix.test }}"
-            }
-          else
-            echo "Test file not found: $full_test_path"
-          fi
+          JOB_START=$(cat /tmp/job_start_${GITHUB_RUN_ID}_${{ matrix.job_id }}.txt)
+          ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/simple_commit_fuzzer.py \
+            --tests-json '${{ toJson(matrix.tests) }}' \
+            --job-id '${{ matrix.job_id }}' \
+            --tests-root 'test/regress/cli' \
+            --job-start-time "$JOB_START" \
+            --stop-buffer-minutes 5 \
+            --iterations 2147483647 \
+            --z3-old-path ${{ github.workspace }}/solvers/z3-4.8.7 \
+            --cvc4-path ${{ github.workspace }}/solvers/cvc4-1.6 \
+            --cvc5-path ./build/bin/cvc5

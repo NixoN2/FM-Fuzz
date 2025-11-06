@@ -2,7 +2,7 @@
 
 ### Components
 - GitHelper: commit metadata, `git show` diff, file blobs at commits.
-- CommitAnalyzer: identifies changed functions and resolves covering tests.
+- PrepareCommitAnalyzer: identifies changed functions and resolves covering tests.
 - Matcher: looks up functions in the coverage map and returns tests.
 
 ### Inputs

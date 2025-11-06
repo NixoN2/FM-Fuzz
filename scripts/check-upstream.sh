@@ -19,6 +19,9 @@ echo "🔍 Checking upstream for $SOLVER_NAME..."
 LATEST_SHA=$(git ls-remote "$REPO_URL" HEAD | cut -f1)
 echo "📡 Latest $SOLVER_NAME commit: $LATEST_SHA"
 
+# Ensure cache directory exists
+mkdir -p .cache
+
 # Check if we have a cached SHA for this solver
 CACHE_FILE=".cache/${SOLVER_NAME}_last_sha"
 if [ -f "$CACHE_FILE" ]; then
@@ -34,17 +37,17 @@ if [ -f "$CACHE_FILE" ]; then
         echo "🔄 $SOLVER_NAME has new commits - build needed"
         echo "build_needed=true" > .build_status
         echo "sha=$LATEST_SHA" >> .build_status
+        # Don't save SHA here - let build jobs save it after successful build
     fi
 else
     echo "🆕 First time checking $SOLVER_NAME - build needed"
     echo "build_needed=true" > .build_status
     echo "sha=$LATEST_SHA" >> .build_status
+    # Don't save SHA here - let build jobs save it after successful build
 fi
 
-# Save the new SHA to cache (will be cached by GitHub Actions)
-mkdir -p .cache
-echo "$LATEST_SHA" > "$CACHE_FILE"
-echo "💾 Updated $SOLVER_NAME SHA cache"
+# Note: SHA is saved by build jobs after successful builds, not here
+# This ensures we only mark commits as "built" after they're actually built
 
 # Output the build status
 cat .build_status
