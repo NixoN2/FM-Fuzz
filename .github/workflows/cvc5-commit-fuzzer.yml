@@ -145,13 +145,13 @@ jobs:
           fi
       
       - name: Download coverage map
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@v11
         with:
           name: coverage-mapping
           path: .
           github_token: ${{ secrets.GITHUB_TOKEN }}
           workflow: cvc5-coverage-mapper.yml
-          branch: main
+          search_artifacts: true
       
       - name: Extract coverage map
         run: |
