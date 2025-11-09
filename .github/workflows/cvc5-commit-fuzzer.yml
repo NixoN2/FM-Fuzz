@@ -338,3 +338,96 @@ jobs:
             --z3-old-path ${{ github.workspace }}/solvers/z3-4.8.7 \
             --cvc4-path ${{ github.workspace }}/solvers/cvc4-1.6 \
             --cvc5-path ./build/bin/cvc5
+      
+      - name: Upload bugs as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bugs-job-${{ matrix.job_id }}
+          path: cvc5/bugs
+          retention-days: 1
+          if-no-files-found: ignore
+
+  collect-bugs:
+    needs: [commit-fuzzer, fuzzer-jobs]
+    if: always() && needs.commit-fuzzer.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      
+      - name: Download all bug artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: bugs-artifacts
+          pattern: bugs-job-*
+          merge-multiple: false
+      
+      - name: Combine all bugs
+        id: combine-bugs
+        run: |
+          mkdir -p combined-bugs
+          
+          # Copy all bugs from all job artifacts
+          # Each artifact is in bugs-artifacts/bugs-job-{job_id}/bugs/
+          find bugs-artifacts -name "*.smt2" -type f -exec cp {} combined-bugs/ \;
+          
+          # Count bugs
+          BUG_COUNT=$(find combined-bugs -name "*.smt2" -type f 2>/dev/null | wc -l || echo "0")
+          echo "Total bugs found: $BUG_COUNT"
+          echo "bug_count=$BUG_COUNT" >> $GITHUB_OUTPUT
+          
+          if [ "$BUG_COUNT" -eq 0 ]; then
+            echo "No bugs found, skipping upload"
+            echo "bugs_found=false" >> $GITHUB_OUTPUT
+          else
+            echo "bugs_found=true" >> $GITHUB_OUTPUT
+            # List all bugs
+            echo "Bugs found:"
+            find combined-bugs -name "*.smt2" -type f | sort
+          fi
+      
+      - name: Create bugs archive
+        if: steps.combine-bugs.outputs.bugs_found == 'true'
+        run: |
+          COMMIT_HASH="${{ needs.commit-fuzzer.outputs.commit_hash }}"
+          TIMESTAMP=$(date +%s)
+          cd combined-bugs
+          tar -czf ../bugs-${COMMIT_HASH}-${TIMESTAMP}.tar.gz .
+          cd ..
+          ARCHIVE_SIZE=$(du -h bugs-${COMMIT_HASH}-${TIMESTAMP}.tar.gz | cut -f1)
+          echo "Created archive: bugs-${COMMIT_HASH}-${TIMESTAMP}.tar.gz ($ARCHIVE_SIZE)"
+          echo "archive_name=bugs-${COMMIT_HASH}-${TIMESTAMP}.tar.gz" >> $GITHUB_OUTPUT
+      
+      - name: Configure AWS credentials
+        if: steps.combine-bugs.outputs.bugs_found == 'true'
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Upload bugs to S3
+        if: steps.combine-bugs.outputs.bugs_found == 'true'
+        run: |
+          COMMIT_HASH="${{ needs.commit-fuzzer.outputs.commit_hash }}"
+          TIMESTAMP=$(date +%s)
+          ARCHIVE_NAME="bugs-${COMMIT_HASH}-${TIMESTAMP}.tar.gz"
+          S3_KEY="solvers/cvc5/bugs/${ARCHIVE_NAME}"
+          
+          aws s3 cp \
+            ${ARCHIVE_NAME} \
+            s3://${{ secrets.AWS_S3_BUCKET }}/${S3_KEY}
+          
+          echo "✅ Uploaded $ARCHIVE_NAME to S3"
+          echo "S3 path: s3://${{ secrets.AWS_S3_BUCKET }}/${S3_KEY}"
+          echo "Total bugs: ${{ steps.combine-bugs.outputs.bug_count }}"
+      
+      - name: No bugs found
+        if: steps.combine-bugs.outputs.bugs_found != 'true'
+        run: |
+          echo "✅ No bugs found in this run, skipping S3 upload"
