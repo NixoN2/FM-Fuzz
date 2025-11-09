@@ -2,238 +2,112 @@ name: CVC5 Coverage Mapper
 
 on:
   workflow_dispatch:
+    inputs:
+      cvc5_commit_hash:
+        description: 'Optional: CVC5 commit hash to build coverage mapping for (defaults to HEAD)'
+        required: false
+        type: string
 
 jobs:
-  # Split regress0 into 4 jobs (~600 tests each: 2408/4 = 602)
-  regress0a:
+  coverage-analysis:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - job_name: regress0a
+            start_index: 1
+            end_index: 602
+          - job_name: regress0b
+            start_index: 603
+            end_index: 1204
+          - job_name: regress0c
+            start_index: 1205
+            end_index: 1806
+          - job_name: regress0d
+            start_index: 1807
+            end_index: 2408
+          - job_name: regress1a
+            start_index: 2409
+            end_index: 2888
+          - job_name: regress1b
+            start_index: 2889
+            end_index: 3368
+          - job_name: regress1c
+            start_index: 3369
+            end_index: 3850
+          - job_name: regress2
+            start_index: 3851
+            end_index: 3993
+          - job_name: regress3
+            start_index: 3994
+            end_index: 4044
+          - job_name: regress4
+            start_index: 4045
+            end_index: 4054
     
     steps:
       - name: Checkout
         uses: actions/checkout@v5
       
-      - name: Build CVC5 with coverage
+      - name: Checkout CVC5 specific commit if provided
+        if: inputs.cvc5_commit_hash != ''
         run: |
-          ./scripts/cvc5/build.sh --coverage
-      
-      - name: Run regress0a coverage analysis (tests 1-602)
-        run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 1 602
-      
-      - name: Upload regress0a coverage mapping
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-mapping-regress0a
-          path: cvc5/build/coverage_mapping_1_602.json
-          retention-days: 1
-
-  regress0b:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+          if [ -d "cvc5" ]; then
+            cd cvc5
+            git fetch origin
+            git checkout ${{ inputs.cvc5_commit_hash }}
+            echo "Checked out commit: $(git rev-parse HEAD)"
+          else
+            git clone https://github.com/cvc5/cvc5.git cvc5
+            cd cvc5
+            git checkout ${{ inputs.cvc5_commit_hash }}
+            echo "Checked out commit: $(git rev-parse HEAD)"
+          fi
       
       - name: Build CVC5 with coverage
         run: |
           ./scripts/cvc5/build.sh --coverage
       
-      - name: Run regress0b coverage analysis (tests 603-1204)
+      - name: Run coverage analysis (tests ${{ matrix.start_index }}-${{ matrix.end_index }})
         run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 603 1204
+          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh ${{ matrix.start_index }} ${{ matrix.end_index }}
       
-      - name: Upload regress0b coverage mapping
+      - name: Upload coverage mapping
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-mapping-regress0b
-          path: cvc5/build/coverage_mapping_603_1204.json
-          retention-days: 1
-
-  regress0c:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      
-      - name: Build CVC5 with coverage
-        run: |
-          ./scripts/cvc5/build.sh --coverage
-      
-      - name: Run regress0c coverage analysis (tests 1205-1806)
-        run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 1205 1806
-      
-      - name: Upload regress0c coverage mapping
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-mapping-regress0c
-          path: cvc5/build/coverage_mapping_1205_1806.json
-          retention-days: 1
-
-  regress0d:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      
-      - name: Build CVC5 with coverage
-        run: |
-          ./scripts/cvc5/build.sh --coverage
-      
-      - name: Run regress0d coverage analysis (tests 1807-2408)
-        run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 1807 2408
-      
-      - name: Upload regress0d coverage mapping
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-mapping-regress0d
-          path: cvc5/build/coverage_mapping_1807_2408.json
-          retention-days: 1
-
-  # Split regress1 into 3 jobs (~480 tests each: (3850-2409)/3 = 480)
-  regress1a:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      
-      - name: Build CVC5 with coverage
-        run: |
-          ./scripts/cvc5/build.sh --coverage
-      
-      - name: Run regress1a coverage analysis (tests 2409-2888)
-        run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 2409 2888
-      
-      - name: Upload regress1a coverage mapping
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-mapping-regress1a
-          path: cvc5/build/coverage_mapping_2409_2888.json
-          retention-days: 1
-
-  regress1b:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      
-      - name: Build CVC5 with coverage
-        run: |
-          ./scripts/cvc5/build.sh --coverage
-      
-      - name: Run regress1b coverage analysis (tests 2889-3368)
-        run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 2889 3368
-      
-      - name: Upload regress1b coverage mapping
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-mapping-regress1b
-          path: cvc5/build/coverage_mapping_2889_3368.json
-          retention-days: 1
-
-  regress1c:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      
-      - name: Build CVC5 with coverage
-        run: |
-          ./scripts/cvc5/build.sh --coverage
-      
-      - name: Run regress1c coverage analysis (tests 3369-3850)
-        run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 3369 3850
-      
-      - name: Upload regress1c coverage mapping
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-mapping-regress1c
-          path: cvc5/build/coverage_mapping_3369_3850.json
-          retention-days: 1
-
-  regress2:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      
-      - name: Build CVC5 with coverage
-        run: |
-          ./scripts/cvc5/build.sh --coverage
-      
-      - name: Run regress2 coverage analysis (tests 3851-3993)
-        run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 3851 3993
-      
-      - name: Upload regress2 coverage mapping
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-mapping-regress2
-          path: cvc5/build/coverage_mapping_3851_3993.json
-          retention-days: 1
-
-  regress3:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      
-      - name: Build CVC5 with coverage
-        run: |
-          ./scripts/cvc5/build.sh --coverage
-      
-      - name: Run regress3 coverage analysis (tests 3994-4044)
-        run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 3994 4044
-      
-      - name: Upload regress3 coverage mapping
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-mapping-regress3
-          path: cvc5/build/coverage_mapping_3994_4044.json
-          retention-days: 1
-
-  regress4:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      
-      - name: Build CVC5 with coverage
-        run: |
-          ./scripts/cvc5/build.sh --coverage
-      
-      - name: Run regress4 coverage analysis (tests 4045-4054)
-        run: |
-          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/cvc5/coverage/run_coverage_builder.sh 4045 4054
-      
-      - name: Upload regress4 coverage mapping
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-mapping-regress4
-          path: cvc5/build/coverage_mapping_4045_4054.json
+          name: coverage-mapping-${{ matrix.job_name }}
+          path: cvc5/build/coverage_mapping_${{ matrix.start_index }}_${{ matrix.end_index }}.json
           retention-days: 1
 
   # Join all coverage mappings and create final artifact
   join-mappings:
     runs-on: ubuntu-latest
-    needs: [regress0a, regress0b, regress0c, regress0d, regress1a, regress1b, regress1c, regress2, regress3, regress4]
+    needs: [coverage-analysis]
     
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+      
+      - name: Get CVC5 commit hash
+        id: get-commit
+        run: |
+          if [ -n "${{ inputs.cvc5_commit_hash }}" ]; then
+            # Use provided commit hash
+            COMMIT_HASH="${{ inputs.cvc5_commit_hash }}"
+          else
+            # Get commit hash from one of the regress jobs (they all use the same commit)
+            # Clone and get HEAD commit if cvc5 doesn't exist
+            if [ ! -d "cvc5" ]; then
+              git clone https://github.com/cvc5/cvc5.git cvc5
+            fi
+            cd cvc5
+            git fetch origin
+            COMMIT_HASH=$(git rev-parse HEAD)
+            cd ..
+          fi
+          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+          echo "CVC5 commit hash: $COMMIT_HASH"
       
       - name: Download all coverage mappings
         uses: actions/download-artifact@v4
@@ -244,9 +118,30 @@ jobs:
         run: |
           python3 scripts/cvc5/coverage/join_coverage_mappings.py
       
-      - name: Upload final coverage mapping
-        uses: actions/upload-artifact@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
         with:
-          name: coverage-mapping
-          path: coverage_mapping.json.gz
-          retention-days: 45
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Upload final coverage mapping to S3
+        run: |
+          COMMIT_HASH="${{ steps.get-commit.outputs.commit_hash }}"
+          S3_KEY="solvers/cvc5/coverage-mappings/coverage_mapping-${COMMIT_HASH}.json.gz"
+          
+          if [ ! -f "coverage_mapping.json.gz" ]; then
+            echo "❌ Error: coverage_mapping.json.gz not found"
+            exit 1
+          fi
+          
+          # Upload with tag for lifecycle rule
+          aws s3api put-object \
+            --bucket ${{ secrets.AWS_S3_BUCKET }} \
+            --key "$S3_KEY" \
+            --body coverage_mapping.json.gz \
+            --tagging "Type=CoverageMapping"
+          
+          echo "✅ Uploaded coverage mapping to S3"
+          echo "S3 path: s3://${{ secrets.AWS_S3_BUCKET }}/${S3_KEY}"
+          echo "Commit hash: ${COMMIT_HASH}"

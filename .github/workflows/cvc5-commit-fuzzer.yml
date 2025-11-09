@@ -7,6 +7,10 @@ on:
         description: 'Optional: CVC5 commit hash to analyze (defaults to HEAD)'
         required: false
         type: string
+      coverage_commit_hash:
+        description: 'Optional: CVC5 commit hash for coverage mapping (defaults to latest in S3)'
+        required: false
+        type: string
       stop_buffer_minutes:
         description: 'Optional: Minutes before timeout to stop fuzzing (default: 5)'
         required: false
@@ -144,19 +148,67 @@ jobs:
             echo "✅ Using binary from S3, skipping build"
           fi
       
-      - name: Download coverage map
-        uses: dawidd6/action-download-artifact@v11
+      - name: Configure AWS credentials for coverage download
+        uses: aws-actions/configure-aws-credentials@v5.1.0
         with:
-          name: coverage-mapping
-          path: .
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          workflow: cvc5-coverage-mapper.yml
-          search_artifacts: true
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Download coverage map from S3
+        id: download-coverage
+        run: |
+          if [ -n "${{ inputs.coverage_commit_hash }}" ]; then
+            # Use specified commit hash
+            COVERAGE_COMMIT="${{ inputs.coverage_commit_hash }}"
+            S3_KEY="solvers/cvc5/coverage-mappings/coverage_mapping-${COVERAGE_COMMIT}.json.gz"
+            
+            if aws s3api head-object \
+              --bucket ${{ secrets.AWS_S3_BUCKET }} \
+              --key "$S3_KEY" >/dev/null 2>&1; then
+              echo "📥 Downloading coverage mapping for commit: ${COVERAGE_COMMIT}"
+              aws s3 cp \
+                s3://${{ secrets.AWS_S3_BUCKET }}/$S3_KEY \
+                coverage_mapping.json.gz
+              echo "coverage_found=true" >> $GITHUB_OUTPUT
+            else
+              echo "❌ Coverage mapping not found for commit: ${COVERAGE_COMMIT}"
+              echo "coverage_found=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            # Find latest coverage mapping
+            echo "🔍 Finding latest coverage mapping in S3..."
+            LATEST=$(aws s3 ls s3://${{ secrets.AWS_S3_BUCKET }}/solvers/cvc5/coverage-mappings/ \
+              | grep "coverage_mapping-" \
+              | sort -r \
+              | head -n 1 \
+              | awk '{print $4}' || echo "")
+            
+            if [ -n "$LATEST" ]; then
+              echo "📥 Downloading latest coverage mapping: $LATEST"
+              aws s3 cp \
+                s3://${{ secrets.AWS_S3_BUCKET }}/solvers/cvc5/coverage-mappings/$LATEST \
+                coverage_mapping.json.gz
+              echo "coverage_found=true" >> $GITHUB_OUTPUT
+              echo "coverage_file=$LATEST" >> $GITHUB_OUTPUT
+            else
+              echo "❌ No coverage mappings found in S3"
+              echo "coverage_found=false" >> $GITHUB_OUTPUT
+            fi
+          fi
       
       - name: Extract coverage map
+        if: steps.download-coverage.outputs.coverage_found == 'true'
         run: |
           gunzip coverage_mapping.json.gz
           ls -la coverage_mapping.json
+          echo "✅ Coverage mapping extracted successfully"
+      
+      - name: Coverage mapping not found
+        if: steps.download-coverage.outputs.coverage_found != 'true'
+        run: |
+          echo "❌ Coverage mapping not found. Please run coverage mapper workflow first or specify a valid coverage_commit_hash."
+          exit 1
 
       - name: Run Commit Fuzzer and create matrix
         id: extract-tests
