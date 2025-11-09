@@ -392,16 +392,18 @@ jobs:
           fi
       
       - name: Create bugs archive
+        id: create-archive
         if: steps.combine-bugs.outputs.bugs_found == 'true'
         run: |
           COMMIT_HASH="${{ needs.commit-fuzzer.outputs.commit_hash }}"
           TIMESTAMP=$(date +%s)
+          ARCHIVE_NAME="bugs-${COMMIT_HASH}-${TIMESTAMP}.tar.gz"
           cd combined-bugs
-          tar -czf ../bugs-${COMMIT_HASH}-${TIMESTAMP}.tar.gz .
+          tar -czf ../${ARCHIVE_NAME} .
           cd ..
-          ARCHIVE_SIZE=$(du -h bugs-${COMMIT_HASH}-${TIMESTAMP}.tar.gz | cut -f1)
-          echo "Created archive: bugs-${COMMIT_HASH}-${TIMESTAMP}.tar.gz ($ARCHIVE_SIZE)"
-          echo "archive_name=bugs-${COMMIT_HASH}-${TIMESTAMP}.tar.gz" >> $GITHUB_OUTPUT
+          ARCHIVE_SIZE=$(du -h ${ARCHIVE_NAME} | cut -f1)
+          echo "Created archive: ${ARCHIVE_NAME} ($ARCHIVE_SIZE)"
+          echo "archive_name=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
       
       - name: Configure AWS credentials
         if: steps.combine-bugs.outputs.bugs_found == 'true'
@@ -414,10 +416,13 @@ jobs:
       - name: Upload bugs to S3
         if: steps.combine-bugs.outputs.bugs_found == 'true'
         run: |
-          COMMIT_HASH="${{ needs.commit-fuzzer.outputs.commit_hash }}"
-          TIMESTAMP=$(date +%s)
-          ARCHIVE_NAME="bugs-${COMMIT_HASH}-${TIMESTAMP}.tar.gz"
+          ARCHIVE_NAME="${{ steps.create-archive.outputs.archive_name }}"
           S3_KEY="solvers/cvc5/bugs/${ARCHIVE_NAME}"
+          
+          if [ ! -f "$ARCHIVE_NAME" ]; then
+            echo "❌ Error: Archive file not found: $ARCHIVE_NAME"
+            exit 1
+          fi
           
           aws s3 cp \
             ${ARCHIVE_NAME} \
