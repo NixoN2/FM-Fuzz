@@ -17,16 +17,16 @@ jobs:
         include:
           - job_name: z3-part1
             start_index: 1
-            end_index: 283
+            end_index: 269
           - job_name: z3-part2
-            start_index: 284
-            end_index: 566
+            start_index: 270
+            end_index: 538
           - job_name: z3-part3
-            start_index: 567
-            end_index: 849
+            start_index: 539
+            end_index: 807
           - job_name: z3-part4
-            start_index: 850
-            end_index: 1133
+            start_index: 808
+            end_index: 1077
     
     steps:
       - name: Checkout

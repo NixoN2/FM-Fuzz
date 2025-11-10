@@ -99,6 +99,11 @@ class CoverageMapper:
             tests = []
             # Find all .smt and .smt2 files recursively in regressions directory
             for smt_file in regressions_dir.rglob("*.smt*"):
+                # Skip if there's a corresponding .disabled file (known failing tests)
+                disabled_file = smt_file.with_suffix(smt_file.suffix + '.disabled')
+                if disabled_file.exists():
+                    continue
+                
                 # Get relative path from z3test directory
                 rel_path = smt_file.relative_to(self.z3test_dir)
                 tests.append(str(rel_path))
