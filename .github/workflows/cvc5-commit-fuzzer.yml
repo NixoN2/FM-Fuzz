@@ -7,6 +7,10 @@ on:
         description: 'Optional: CVC5 commit hash to analyze (defaults to HEAD)'
         required: false
         type: string
+      coverage_commit_hash:
+        description: 'Optional: CVC5 commit hash for coverage mapping (defaults to latest in S3)'
+        required: false
+        type: string
       stop_buffer_minutes:
         description: 'Optional: Minutes before timeout to stop fuzzing (default: 5)'
         required: false
@@ -89,62 +93,122 @@ jobs:
           echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
           echo "CVC5 commit hash: $COMMIT_HASH"
 
-      - name: Download coverage binary and compile_commands.json
-        id: download-coverage-binary
-        uses: dawidd6/action-download-artifact@v11
-        continue-on-error: true
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
         with:
-          name: coverage-cvc5-${{ steps.get-commit.outputs.commit_hash }}
-          path: artifacts
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          workflow: cvc5.yml
-          search_artifacts: true
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Download coverage binary from S3
+        id: download-coverage-binary
+        continue-on-error: true
+        run: |
+          mkdir -p artifacts
+          S3_KEY="solvers/cvc5/builds/coverage/${{ steps.get-commit.outputs.commit_hash }}.tar.gz"
+          
+          if aws s3api head-object \
+            --bucket ${{ secrets.AWS_S3_BUCKET }} \
+            --key "$S3_KEY" >/dev/null 2>&1; then
+            echo "📥 Downloading coverage binary from S3..."
+            aws s3 cp \
+              s3://${{ secrets.AWS_S3_BUCKET }}/$S3_KEY \
+              artifacts/artifacts.tar.gz
+            echo "binary_available=true" >> $GITHUB_OUTPUT
+          else
+            echo "WARNING: Coverage binary not found in S3, will build as fallback"
+            echo "binary_available=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Extract coverage binary, headers, and compile_commands.json
         id: extract-coverage-binary
+        if: steps.download-coverage-binary.outputs.binary_available == 'true'
         run: |
-          # Find artifacts.tar.gz
-          ARTIFACT_FILE=""
           if [ -f "artifacts/artifacts.tar.gz" ]; then
-            ARTIFACT_FILE="artifacts/artifacts.tar.gz"
-          elif [ -f "artifacts/cvc5/build/artifacts.tar.gz" ]; then
-            ARTIFACT_FILE="artifacts/cvc5/build/artifacts.tar.gz"
-          fi
-          
-          if [ -n "$ARTIFACT_FILE" ]; then
-            ./scripts/cvc5/extract_build_artifacts.sh "$ARTIFACT_FILE" cvc5/build true
+            ./scripts/cvc5/extract_build_artifacts.sh artifacts/artifacts.tar.gz cvc5/build true
             if [ -f "cvc5/build/bin/cvc5" ]; then
-              echo "binary_available=true" >> $GITHUB_OUTPUT
+              echo "✅ Coverage binary extracted successfully"
             else
+              echo "⚠️ Binary extraction failed"
               echo "binary_available=false" >> $GITHUB_OUTPUT
             fi
           else
-            echo "WARNING: artifacts.tar.gz not found, will build as fallback"
             echo "binary_available=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Build cvc5 static binary with coverage (fallback)
-        if: steps.extract-coverage-binary.outputs.binary_available != 'true'
         run: |
-          echo "🔨 Building CVC5 static binary with coverage as fallback (binary not available from artifacts)"
-          # Set environment variables to ensure clang uses GCC 14 toolchain
-          export CXX="clang++ --gcc-toolchain=/usr"
-          export CC="clang --gcc-toolchain=/usr"
-          ./scripts/cvc5/build.sh --static --coverage
+          if [ ! -f "cvc5/build/bin/cvc5" ]; then
+            echo "🔨 Building CVC5 static binary with coverage as fallback (binary not available from S3)"
+            # Set environment variables to ensure clang uses GCC 14 toolchain
+            export CXX="clang++ --gcc-toolchain=/usr"
+            export CC="clang --gcc-toolchain=/usr"
+            ./scripts/cvc5/build.sh --static --coverage
+          else
+            echo "✅ Using binary from S3, skipping build"
+          fi
       
-      - name: Download coverage map
-        uses: dawidd6/action-download-artifact@v11
+      - name: Configure AWS credentials for coverage download
+        uses: aws-actions/configure-aws-credentials@v5.1.0
         with:
-          name: coverage-mapping
-          path: .
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          workflow: cvc5-coverage-mapper.yml
-          search_artifacts: true
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Download coverage map from S3
+        id: download-coverage
+        run: |
+          if [ -n "${{ inputs.coverage_commit_hash }}" ]; then
+            # Use specified commit hash
+            COVERAGE_COMMIT="${{ inputs.coverage_commit_hash }}"
+            S3_KEY="solvers/cvc5/coverage-mappings/coverage_mapping-${COVERAGE_COMMIT}.json.gz"
+            
+            if aws s3api head-object \
+              --bucket ${{ secrets.AWS_S3_BUCKET }} \
+              --key "$S3_KEY" >/dev/null 2>&1; then
+              echo "📥 Downloading coverage mapping for commit: ${COVERAGE_COMMIT}"
+              aws s3 cp \
+                s3://${{ secrets.AWS_S3_BUCKET }}/$S3_KEY \
+                coverage_mapping.json.gz
+              echo "coverage_found=true" >> $GITHUB_OUTPUT
+            else
+              echo "❌ Coverage mapping not found for commit: ${COVERAGE_COMMIT}"
+              echo "coverage_found=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            # Find latest coverage mapping
+            echo "🔍 Finding latest coverage mapping in S3..."
+            LATEST=$(aws s3 ls s3://${{ secrets.AWS_S3_BUCKET }}/solvers/cvc5/coverage-mappings/ \
+              | grep "coverage_mapping-" \
+              | sort -r \
+              | head -n 1 \
+              | awk '{print $4}' || echo "")
+            
+            if [ -n "$LATEST" ]; then
+              echo "📥 Downloading latest coverage mapping: $LATEST"
+              aws s3 cp \
+                s3://${{ secrets.AWS_S3_BUCKET }}/solvers/cvc5/coverage-mappings/$LATEST \
+                coverage_mapping.json.gz
+              echo "coverage_found=true" >> $GITHUB_OUTPUT
+              echo "coverage_file=$LATEST" >> $GITHUB_OUTPUT
+            else
+              echo "❌ No coverage mappings found in S3"
+              echo "coverage_found=false" >> $GITHUB_OUTPUT
+            fi
+          fi
       
       - name: Extract coverage map
+        if: steps.download-coverage.outputs.coverage_found == 'true'
         run: |
           gunzip coverage_mapping.json.gz
           ls -la coverage_mapping.json
+          echo "✅ Coverage mapping extracted successfully"
+      
+      - name: Coverage mapping not found
+        if: steps.download-coverage.outputs.coverage_found != 'true'
+        run: |
+          echo "❌ Coverage mapping not found. Please run coverage mapper workflow first or specify a valid coverage_commit_hash."
+          exit 1
 
       - name: Run Commit Fuzzer and create matrix
         id: extract-tests
@@ -254,45 +318,57 @@ jobs:
           git checkout ${{ needs.commit-fuzzer.outputs.commit_hash }}
           echo "Checked out commit: $(git rev-parse HEAD)"
 
-      - name: Download production binary
-        id: download-production-binary
-        uses: dawidd6/action-download-artifact@v11
-        continue-on-error: true
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
         with:
-          name: cvc5-${{ needs.commit-fuzzer.outputs.commit_hash }}
-          path: artifacts
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          workflow: cvc5.yml
-          search_artifacts: true
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Download production binary from S3
+        id: download-production-binary
+        continue-on-error: true
+        run: |
+          mkdir -p artifacts
+          S3_KEY="solvers/cvc5/builds/production/${{ needs.commit-fuzzer.outputs.commit_hash }}.tar.gz"
+          
+          if aws s3api head-object \
+            --bucket ${{ secrets.AWS_S3_BUCKET }} \
+            --key "$S3_KEY" >/dev/null 2>&1; then
+            echo "📥 Downloading production binary from S3..."
+            aws s3 cp \
+              s3://${{ secrets.AWS_S3_BUCKET }}/$S3_KEY \
+              artifacts/artifacts.tar.gz
+            echo "binary_available=true" >> $GITHUB_OUTPUT
+          else
+            echo "WARNING: Production binary not found in S3, will build as fallback"
+            echo "binary_available=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Extract production binary
         id: extract-production-binary
+        if: steps.download-production-binary.outputs.binary_available == 'true'
         run: |
-          # Find artifacts.tar.gz (production binary doesn't need headers)
-          ARTIFACT_FILE=""
           if [ -f "artifacts/artifacts.tar.gz" ]; then
-            ARTIFACT_FILE="artifacts/artifacts.tar.gz"
-          elif [ -f "artifacts/cvc5/build/artifacts.tar.gz" ]; then
-            ARTIFACT_FILE="artifacts/cvc5/build/artifacts.tar.gz"
-          fi
-          
-          if [ -n "$ARTIFACT_FILE" ]; then
-            ./scripts/cvc5/extract_build_artifacts.sh "$ARTIFACT_FILE" cvc5/build false
+            ./scripts/cvc5/extract_build_artifacts.sh artifacts/artifacts.tar.gz cvc5/build false
             if [ -f "cvc5/build/bin/cvc5" ]; then
-              echo "binary_available=true" >> $GITHUB_OUTPUT
+              echo "✅ Production binary extracted successfully"
             else
+              echo "⚠️ Binary extraction failed"
               echo "binary_available=false" >> $GITHUB_OUTPUT
             fi
           else
-            echo "WARNING: artifacts.tar.gz not found, will build as fallback"
             echo "binary_available=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Build cvc5 static binary (fallback)
-        if: steps.extract-production-binary.outputs.binary_available != 'true'
         run: |
-          echo "🔨 Building CVC5 static binary as fallback (binary not available from artifacts)"
-          ./scripts/cvc5/build.sh --static
+          if [ ! -f "cvc5/build/bin/cvc5" ]; then
+            echo "🔨 Building CVC5 static binary as fallback (binary not available from S3)"
+            ./scripts/cvc5/build.sh --static
+          else
+            echo "✅ Using binary from S3, skipping build"
+          fi
 
       - name: Verify solver binaries
         run: |
@@ -314,3 +390,101 @@ jobs:
             --z3-old-path ${{ github.workspace }}/solvers/z3-4.8.7 \
             --cvc4-path ${{ github.workspace }}/solvers/cvc4-1.6 \
             --cvc5-path ./build/bin/cvc5
+      
+      - name: Upload bugs as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bugs-job-${{ matrix.job_id }}
+          path: cvc5/bugs
+          retention-days: 1
+          if-no-files-found: ignore
+
+  collect-bugs:
+    needs: [commit-fuzzer, fuzzer-jobs]
+    if: always() && needs.commit-fuzzer.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      
+      - name: Download all bug artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: bugs-artifacts
+          pattern: bugs-job-*
+          merge-multiple: false
+      
+      - name: Combine all bugs
+        id: combine-bugs
+        run: |
+          mkdir -p combined-bugs
+          
+          # Copy all bugs from all job artifacts
+          # Each artifact is in bugs-artifacts/bugs-job-{job_id}/bugs/
+          find bugs-artifacts -name "*.smt2" -type f -exec cp {} combined-bugs/ \;
+          
+          # Count bugs
+          BUG_COUNT=$(find combined-bugs -name "*.smt2" -type f 2>/dev/null | wc -l || echo "0")
+          echo "Total bugs found: $BUG_COUNT"
+          echo "bug_count=$BUG_COUNT" >> $GITHUB_OUTPUT
+          
+          if [ "$BUG_COUNT" -eq 0 ]; then
+            echo "No bugs found, skipping upload"
+            echo "bugs_found=false" >> $GITHUB_OUTPUT
+          else
+            echo "bugs_found=true" >> $GITHUB_OUTPUT
+            # List all bugs
+            echo "Bugs found:"
+            find combined-bugs -name "*.smt2" -type f | sort
+          fi
+      
+      - name: Create bugs archive
+        id: create-archive
+        if: steps.combine-bugs.outputs.bugs_found == 'true'
+        run: |
+          COMMIT_HASH="${{ needs.commit-fuzzer.outputs.commit_hash }}"
+          TIMESTAMP=$(date +%s)
+          ARCHIVE_NAME="bugs-${COMMIT_HASH}-${TIMESTAMP}.tar.gz"
+          cd combined-bugs
+          tar -czf ../${ARCHIVE_NAME} .
+          cd ..
+          ARCHIVE_SIZE=$(du -h ${ARCHIVE_NAME} | cut -f1)
+          echo "Created archive: ${ARCHIVE_NAME} ($ARCHIVE_SIZE)"
+          echo "archive_name=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
+      
+      - name: Configure AWS credentials
+        if: steps.combine-bugs.outputs.bugs_found == 'true'
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Upload bugs to S3
+        if: steps.combine-bugs.outputs.bugs_found == 'true'
+        run: |
+          ARCHIVE_NAME="${{ steps.create-archive.outputs.archive_name }}"
+          S3_KEY="solvers/cvc5/bugs/${ARCHIVE_NAME}"
+          
+          if [ ! -f "$ARCHIVE_NAME" ]; then
+            echo "❌ Error: Archive file not found: $ARCHIVE_NAME"
+            exit 1
+          fi
+          
+          aws s3 cp \
+            ${ARCHIVE_NAME} \
+            s3://${{ secrets.AWS_S3_BUCKET }}/${S3_KEY}
+          
+          echo "✅ Uploaded $ARCHIVE_NAME to S3"
+          echo "S3 path: s3://${{ secrets.AWS_S3_BUCKET }}/${S3_KEY}"
+          echo "Total bugs: ${{ steps.combine-bugs.outputs.bug_count }}"
+      
+      - name: No bugs found
+        if: steps.combine-bugs.outputs.bugs_found != 'true'
+        run: |
+          echo "✅ No bugs found in this run, skipping S3 upload"
