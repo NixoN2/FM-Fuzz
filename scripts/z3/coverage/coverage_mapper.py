@@ -163,8 +163,9 @@ class CoverageMapper:
             )
         else:
             # Run Z3 directly if no .expected.out file (skip validation)
+            # Add model_validate=true flag (test_benchmark.py does this automatically)
             result = subprocess.run(
-                [str(self.z3_binary), str(smt_file)],
+                [str(self.z3_binary), "model_validate=true", str(smt_file)],
                 cwd=self.build_dir,
                 capture_output=True,
                 text=True,
