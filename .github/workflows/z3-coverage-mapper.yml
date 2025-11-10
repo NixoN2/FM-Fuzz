@@ -1,0 +1,137 @@
+name: Z3 Coverage Mapper
+
+on:
+  workflow_dispatch:
+    inputs:
+      z3_commit_hash:
+        description: 'Optional: Z3 commit hash to build coverage mapping for (defaults to HEAD)'
+        required: false
+        type: string
+
+jobs:
+  coverage-analysis:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - job_name: z3-part1
+            start_index: 1
+            end_index: 283
+          - job_name: z3-part2
+            start_index: 284
+            end_index: 566
+          - job_name: z3-part3
+            start_index: 567
+            end_index: 849
+          - job_name: z3-part4
+            start_index: 850
+            end_index: 1133
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      
+      - name: Checkout Z3 specific commit if provided
+        if: inputs.z3_commit_hash != ''
+        run: |
+          if [ -d "z3" ]; then
+            cd z3
+            git fetch origin
+            git checkout ${{ inputs.z3_commit_hash }}
+            echo "Checked out commit: $(git rev-parse HEAD)"
+          else
+            git clone https://github.com/Z3Prover/z3.git z3
+            cd z3
+            git checkout ${{ inputs.z3_commit_hash }}
+            echo "Checked out commit: $(git rev-parse HEAD)"
+          fi
+      
+      - name: Clone z3test repository
+        run: |
+          if [ -d "z3test" ]; then
+            echo "z3test directory already exists, skipping clone"
+          else
+            git clone https://github.com/z3prover/z3test.git z3test
+          fi
+      
+      - name: Build Z3 with coverage
+        run: |
+          ./scripts/z3/build.sh --coverage
+      
+      - name: Run coverage analysis (tests ${{ matrix.start_index }}-${{ matrix.end_index }})
+        run: |
+          ${{ github.workspace }}/scripts/measure_time.sh ${{ github.workspace }}/scripts/z3/coverage/run_coverage_builder.sh ${{ matrix.start_index }} ${{ matrix.end_index }}
+      
+      - name: Upload coverage mapping
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-mapping-${{ matrix.job_name }}
+          path: z3/build/coverage_mapping_${{ matrix.start_index }}_${{ matrix.end_index }}.json
+          retention-days: 1
+
+  # Join all coverage mappings and create final artifact
+  join-mappings:
+    runs-on: ubuntu-latest
+    needs: [coverage-analysis]
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      
+      - name: Get Z3 commit hash
+        id: get-commit
+        run: |
+          if [ -n "${{ inputs.z3_commit_hash }}" ]; then
+            # Use provided commit hash
+            COMMIT_HASH="${{ inputs.z3_commit_hash }}"
+          else
+            # Get commit hash from Z3 repository
+            if [ ! -d "z3" ]; then
+              git clone https://github.com/Z3Prover/z3.git z3
+            fi
+            cd z3
+            git fetch origin
+            COMMIT_HASH=$(git rev-parse HEAD)
+            cd ..
+          fi
+          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+          echo "Z3 commit hash: $COMMIT_HASH"
+      
+      - name: Download all coverage mappings
+        uses: actions/download-artifact@v4
+        with:
+          path: coverage-mappings
+      
+      - name: Join coverage mappings
+        run: |
+          python3 scripts/z3/coverage/join_coverage_mappings.py
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Upload final coverage mapping to S3
+        run: |
+          COMMIT_HASH="${{ steps.get-commit.outputs.commit_hash }}"
+          S3_KEY="solvers/z3/coverage-mappings/coverage_mapping-${COMMIT_HASH}.json.gz"
+          
+          if [ ! -f "coverage_mapping.json.gz" ]; then
+            echo "❌ Error: coverage_mapping.json.gz not found"
+            exit 1
+          fi
+          
+          # Upload with tag for lifecycle rule
+          aws s3api put-object \
+            --bucket ${{ secrets.AWS_S3_BUCKET }} \
+            --key "$S3_KEY" \
+            --body coverage_mapping.json.gz \
+            --tagging "Type=CoverageMapping"
+          
+          echo "✅ Uploaded coverage mapping to S3"
+          echo "S3 path: s3://${{ secrets.AWS_S3_BUCKET }}/${S3_KEY}"
+          echo "Commit hash: ${COMMIT_HASH}"
+
