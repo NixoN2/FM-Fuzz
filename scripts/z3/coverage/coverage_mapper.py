@@ -137,35 +137,57 @@ class CoverageMapper:
             sys.stdout.flush()
             return None
         
-        # Get path to test_benchmark.py script
-        test_benchmark_script = self.z3test_dir / "scripts" / "test_benchmark.py"
-        
-        if not test_benchmark_script.exists():
-            print(f"⚠️ test_benchmark.py not found: {test_benchmark_script}")
-            sys.stdout.flush()
-            return None
+        # Check if .expected.out file exists
+        expected_out_file = smt_file.with_suffix(smt_file.suffix + '.expected.out')
+        use_test_benchmark = expected_out_file.exists()
         
         # Measure test execution time
         start_time = time.time()
         
-        # Run test using test_benchmark.py script
-        result = subprocess.run(
-            ["python3", str(test_benchmark_script), str(self.z3_binary), str(smt_file)],
-            cwd=self.build_dir,
-            capture_output=True,
-            text=True,
-            check=False
-        )
+        if use_test_benchmark:
+            # Use test_benchmark.py if .expected.out exists
+            test_benchmark_script = self.z3test_dir / "scripts" / "test_benchmark.py"
+            
+            if not test_benchmark_script.exists():
+                print(f"⚠️ test_benchmark.py not found: {test_benchmark_script}")
+                sys.stdout.flush()
+                return None
+            
+            # Run test using test_benchmark.py script
+            result = subprocess.run(
+                ["python3", str(test_benchmark_script), str(self.z3_binary), str(smt_file)],
+                cwd=self.build_dir,
+                capture_output=True,
+                text=True,
+                check=False
+            )
+        else:
+            # Run Z3 directly if no .expected.out file (skip validation)
+            result = subprocess.run(
+                [str(self.z3_binary), str(smt_file)],
+                cwd=self.build_dir,
+                capture_output=True,
+                text=True,
+                check=False
+            )
         
         end_time = time.time()
         execution_time = round(end_time - start_time, 2)
         
-        # Z3 returns 0 for sat/unsat, non-zero for errors
-        # We still want coverage even if test fails (might be expected)
-        if result.returncode != 0 and result.returncode != 10:  # 10 is unsat, 0 is sat
-            print(f"⚠️ {test_name} - exit code {result.returncode} - {execution_time}s")
+        # Log result
+        if use_test_benchmark:
+            # test_benchmark.py returns 0 on success, 1 on failure
+            if result.returncode == 0:
+                print(f"✅ {test_name} - {execution_time}s")
+            else:
+                print(f"⚠️ {test_name} - exit code {result.returncode} - {execution_time}s")
         else:
-            print(f"✅ {test_name} - {execution_time}s")
+            # Z3 direct execution - log but don't treat as failure
+            # Z3 returns 0 for sat/unsat (successful completion), non-zero for errors
+            if result.returncode == 0:
+                print(f"✅ {test_name} (no .expected.out) - {execution_time}s")
+            else:
+                print(f"⚠️ {test_name} (no .expected.out) - exit code {result.returncode} - {execution_time}s")
         
         # Extract coverage data
         coverage_data = self.extract_coverage_data(test_name)
