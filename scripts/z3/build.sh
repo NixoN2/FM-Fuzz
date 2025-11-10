@@ -68,6 +68,7 @@ if [[ "$ENABLE_COVERAGE" == "true" ]]; then
     echo "🔍 Configuring Z3 with coverage instrumentation..."
     CFLAGS="-O0 -g --coverage" CXXFLAGS="-O0 -g --coverage" \
       cmake -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DZ3_BUILD_LIBZ3_SHARED=OFF \
             -DZ3_BUILD_EXECUTABLE=ON \
             -DZ3_BUILD_TEST_EXECUTABLES=OFF \
@@ -75,6 +76,7 @@ if [[ "$ENABLE_COVERAGE" == "true" ]]; then
 elif [[ "$ENABLE_STATIC" == "true" ]]; then
     echo "📦 Configuring Z3 for static binary (production)..."
     cmake -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
           -DZ3_BUILD_LIBZ3_SHARED=OFF \
           -DZ3_BUILD_EXECUTABLE=ON \
           -DZ3_BUILD_TEST_EXECUTABLES=OFF \
@@ -82,6 +84,7 @@ elif [[ "$ENABLE_STATIC" == "true" ]]; then
 else
     echo "⚡ Configuring Z3 for production (no coverage)..."
     cmake -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
           -DZ3_BUILD_LIBZ3_SHARED=OFF \
           -DZ3_BUILD_EXECUTABLE=ON \
           -DZ3_BUILD_TEST_EXECUTABLES=OFF \
