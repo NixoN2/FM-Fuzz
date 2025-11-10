@@ -99,6 +99,10 @@ class CoverageMapper:
             tests = []
             # Find all .smt and .smt2 files recursively in regressions directory
             for smt_file in regressions_dir.rglob("*.smt*"):
+                # Skip .disabled files themselves (they are marker files, not test files)
+                if smt_file.name.endswith('.disabled'):
+                    continue
+                
                 # Skip if there's a corresponding .disabled file (known failing tests)
                 disabled_file = smt_file.with_suffix(smt_file.suffix + '.disabled')
                 if disabled_file.exists():
