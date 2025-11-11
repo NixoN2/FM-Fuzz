@@ -17,46 +17,48 @@ import subprocess
 import sys
 import re
 from pathlib import Path
-from typing import Optional, Tuple, Dict, List
+from typing import Tuple, List
 
-def extract_result(output: str, stderr: str = "") -> str:
-    """
-    Extract SMT result from solver output.
-    Returns: 'sat', 'unsat', 'unknown', 'error', or 'timeout'
-    """
-    # Combine stdout and stderr
+def extract_result(output: str, stderr: str = "", exit_code: int = 0) -> str:
+    """Extract SMT result from solver output. Prioritizes output over exit codes."""
     combined = (output + "\n" + stderr).lower()
     
-    # Look for sat/unsat/unknown in output
-    # These are typically on their own line or followed by whitespace
-    if re.search(r'\bunsat\b', combined):
+    # Check for exact matches first, then word boundaries
+    for line in combined.split('\n'):
+        word = line.strip()
+        if word in ('unsat', 'sat', 'unknown'):
+            return word
+    
+    # Fallback: word boundaries (check unsat first since 'sat' is substring)
+    if re.search(r'(^|\s)unsat(\s|$)', combined):
         return 'unsat'
-    elif re.search(r'\bsat\b', combined):
+    if re.search(r'(^|\s)sat(\s|$)', combined):
         return 'sat'
-    elif re.search(r'\bunknown\b', combined):
+    if re.search(r'(^|\s)unknown(\s|$)', combined):
         return 'unknown'
-    else:
-        return 'error'  # Default to error if we can't determine
+    
+    return 'timeout' if exit_code == 124 else 'error'
 
-def run_solver(solver_path: str, solver_flags: List[str], test_file: str, timeout: int = 120, verbose: bool = False) -> Tuple[int, str, str, str]:
-    """
-    Run a solver on a test file.
-    Returns: (exit_code, result, stdout, stderr)
-    """
-    cmd = [solver_path] + solver_flags + [test_file]
+def check_has_set_logic(test_file: Path) -> bool:
+    """Check if SMT file has set-logic command"""
+    try:
+        return bool(re.search(r'\(set-logic\s+', test_file.read_text(), re.IGNORECASE))
+    except Exception:
+        return False
+
+def run_solver(solver_path: str, solver_flags: List[str], test_file: str, timeout: int = 120, verbose: bool = False, is_cvc5: bool = False) -> Tuple[int, str, str, str]:
+    """Run a solver on a test file. Returns: (exit_code, result, stdout, stderr)"""
+    cmd = [solver_path] + solver_flags
+    if is_cvc5 and not check_has_set_logic(Path(test_file)):
+        cmd.append('--force-logic=ALL')
+    cmd.append(test_file)
     
     if verbose:
         print(f"Running: {' '.join(cmd)}", file=sys.stderr)
     
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout
-        )
-        result_str = extract_result(result.stdout, result.stderr)
-        return (result.returncode, result_str, result.stdout, result.stderr)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return (result.returncode, extract_result(result.stdout, result.stderr, result.returncode), result.stdout, result.stderr)
     except subprocess.TimeoutExpired:
         return (124, 'timeout', '', f'Timeout after {timeout}s')
     except FileNotFoundError:
@@ -83,45 +85,45 @@ def main():
             print(f"Error: Test file not found: {test_file}", file=sys.stderr)
         sys.exit(1)
     
-    # CVC5 flags (reference solver)
     cvc5_flags = ['--check-models', '--check-proofs', '--strings-exp']
+    solver_flags = args.solver_flags or []
     
-    # Solver flags - use provided flags or default to empty
-    solver_flags = args.solver_flags if args.solver_flags else []
-    
-    # Run CVC5 (reference)
     cvc5_exit, cvc5_result, cvc5_stdout, cvc5_stderr = run_solver(
-        args.cvc5_path, cvc5_flags, str(test_file), args.timeout, args.verbose
+        args.cvc5_path, cvc5_flags, str(test_file), args.timeout, args.verbose, is_cvc5=True
     )
-    
-    # Run solver to compare
     solver_exit, solver_result, solver_stdout, solver_stderr = run_solver(
-        args.solver_path, solver_flags, str(test_file), args.timeout, args.verbose
+        args.solver_path, solver_flags, str(test_file), args.timeout, args.verbose, is_cvc5=False
     )
     
-    # Print results only if verbose
     if args.verbose:
         print(f"CVC5 (reference): {cvc5_result} (exit code: {cvc5_exit})")
         print(f"Solver: {solver_result} (exit code: {solver_exit})")
     
-    # Check if solvers agree
-    # Only consider sat/unsat as valid results that must agree
     valid_results = {'sat', 'unsat'}
     
+    # Both solvers produced valid results - check agreement
     if cvc5_result in valid_results and solver_result in valid_results:
         if cvc5_result == solver_result:
             if args.verbose:
                 print("✅ Solvers agree")
             sys.exit(0)
-        else:
-            if args.verbose:
-                print(f"❌ Solvers disagree: CVC5={cvc5_result}, Solver={solver_result}")
-            sys.exit(1)
-    elif cvc5_result == 'timeout' or solver_result == 'timeout':
+        if args.verbose:
+            print(f"❌ Solvers disagree: CVC5={cvc5_result}, Solver={solver_result}")
+        sys.exit(1)
+    
+    # One solver has valid result, other doesn't - disagreement
+    if cvc5_result in valid_results or solver_result in valid_results:
+        if args.verbose:
+            print(f"⚠️ CVC5={cvc5_result}, Solver={solver_result}")
+        sys.exit(1)
+    
+    # Handle timeouts and errors
+    if 'timeout' in (cvc5_result, solver_result):
         if args.verbose:
             print("⏱️ One or both solvers timed out")
         sys.exit(1)
-    elif cvc5_result == 'error' or solver_result == 'error':
+    
+    if 'error' in (cvc5_result, solver_result):
         if args.verbose:
             print("❌ One or both solvers encountered an error")
             if cvc5_stderr:
@@ -129,11 +131,11 @@ def main():
             if solver_stderr:
                 print(f"Solver stderr: {solver_stderr[:200]}")
         sys.exit(1)
-    else:
-        # At least one solver returned unknown or other non-standard result
-        if args.verbose:
-            print(f"⚠️ Non-standard results: CVC5={cvc5_result}, Solver={solver_result}")
-        sys.exit(1)
+    
+    # Non-standard results
+    if args.verbose:
+        print(f"⚠️ Non-standard results: CVC5={cvc5_result}, Solver={solver_result}")
+    sys.exit(1)
 
 if __name__ == "__main__":
     main()
