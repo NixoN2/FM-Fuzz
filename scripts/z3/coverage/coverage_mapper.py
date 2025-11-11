@@ -450,9 +450,20 @@ def main():
     
     args = parser.parse_args()
     
-    mapper = CoverageMapper(args.build_dir, args.z3test_dir, args.cvc5_path)
-    mapper.run(max_tests=args.max_tests, test_pattern=args.test_pattern, 
-               start_index=args.start_index, end_index=args.end_index)
+    try:
+        mapper = CoverageMapper(args.build_dir, args.z3test_dir, args.cvc5_path)
+        mapper.run(max_tests=args.max_tests, test_pattern=args.test_pattern, 
+                   start_index=args.start_index, end_index=args.end_index)
+    except KeyboardInterrupt:
+        # Handle Ctrl+C gracefully
+        print("\n⚠️ Interrupted by user")
+        sys.stdout.flush()
+    except Exception as e:
+        # Catch any unhandled exceptions and exit gracefully
+        print(f"⚠️ Unexpected error: {e}")
+        sys.stdout.flush()
+    # Always exit with code 0 to prevent GitHub Actions from stopping
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()

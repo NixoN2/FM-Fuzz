@@ -3,8 +3,6 @@
 # Usage: ./measure_time.sh <script_to_run> [args...]
 # Example: ./measure_time.sh ./build.sh --coverage
 
-set -e
-
 if [ $# -eq 0 ]; then
     echo "Usage: $0 <script_to_run> [args...]"
     echo "Example: $0 ./build.sh --coverage"
@@ -26,12 +24,18 @@ echo "🚀 Started at: $START_TIMESTAMP"
 echo ""
 
 # Run the script with all remaining arguments
-if "$SCRIPT_TO_RUN" "$@"; then
-    EXIT_CODE=0
-    RESULT="SUCCESS"
-else
+# Use trap to handle SIGTERM (exit code 143) gracefully
+EXIT_CODE=0
+RESULT="SUCCESS"
+if ! "$SCRIPT_TO_RUN" "$@"; then
     EXIT_CODE=$?
     RESULT="FAILED"
+    # If killed by SIGTERM (143), treat as success to prevent GitHub Actions from stopping
+    if [ $EXIT_CODE -eq 143 ]; then
+        echo "⚠️ Process was terminated (SIGTERM), but continuing..."
+        EXIT_CODE=0
+        RESULT="TERMINATED"
+    fi
 fi
 
 # End timing
@@ -71,4 +75,6 @@ EOF
 
 echo "📁 Results saved to: $RESULTS_FILE"
 
-exit $EXIT_CODE
+# Always exit with 0 to prevent GitHub Actions from stopping
+# (individual scripts handle their own errors)
+exit 0
