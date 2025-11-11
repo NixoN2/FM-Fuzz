@@ -1,0 +1,682 @@
+name: Z3 Commit Fuzzer
+
+on:
+  workflow_dispatch:
+    inputs:
+      z3_commit_hash:
+        description: 'Optional: Z3 commit hash to analyze (defaults to HEAD)'
+        required: false
+        type: string
+      coverage_commit_hash:
+        description: 'Optional: Z3 commit hash for coverage mapping (defaults to latest in S3)'
+        required: false
+        type: string
+      stop_buffer_minutes:
+        description: 'Optional: Minutes before timeout to stop fuzzing (default: 5)'
+        required: false
+        type: number
+        default: 5
+  schedule:
+    - cron: '30 * * * *'  # Run at 30 minutes past every hour (0:30, 1:30, 2:30, etc.)
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      fuzzing_needed: ${{ steps.set-outputs.outputs.fuzzing_needed }}
+      sha: ${{ steps.set-outputs.outputs.sha }}
+      is_manual_run: ${{ steps.set-outputs.outputs.is_manual_run }}
+      binary_available: ${{ steps.check-binary.outputs.binary_available }}
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      
+      - name: Download last fuzzed SHA from artifacts
+        if: github.event_name == 'schedule'
+        uses: dawidd6/action-download-artifact@v6
+        id: download-sha
+        continue-on-error: true
+        with:
+          name: z3-last-fuzzed-sha
+          path: .cache
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: z3-commit-fuzzer.yml
+      
+      - name: Check upstream for new commits
+        id: set-outputs-scheduled
+        if: github.event_name == 'schedule'
+        run: |
+          echo "📥 Checking for upstream changes..."
+          # Ensure .cache directory exists
+          mkdir -p .cache
+          ./scripts/check-upstream.sh z3 https://github.com/Z3Prover/z3.git
+          echo "fuzzing_needed=$(cat .build_status | grep build_needed | cut -d'=' -f2)" >> $GITHUB_OUTPUT
+          echo "sha=$(cat .build_status | grep sha | cut -d'=' -f2)" >> $GITHUB_OUTPUT
+          echo "is_manual_run=false" >> $GITHUB_OUTPUT
+      
+      - name: Set manual run outputs
+        id: set-outputs-manual
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "🔨 Manual run triggered"
+          echo "fuzzing_needed=true" >> $GITHUB_OUTPUT
+          echo "sha=${{ inputs.z3_commit_hash }}" >> $GITHUB_OUTPUT
+          echo "is_manual_run=true" >> $GITHUB_OUTPUT
+      
+      - name: Set combined outputs
+        id: set-outputs
+        run: |
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            FUZZING_NEEDED="${{ steps.set-outputs-scheduled.outputs.fuzzing_needed }}"
+            SHA="${{ steps.set-outputs-scheduled.outputs.sha }}"
+            echo "fuzzing_needed=${FUZZING_NEEDED:-false}" >> $GITHUB_OUTPUT
+            echo "sha=${SHA:-}" >> $GITHUB_OUTPUT
+            echo "is_manual_run=false" >> $GITHUB_OUTPUT
+          else
+            FUZZING_NEEDED="${{ steps.set-outputs-manual.outputs.fuzzing_needed }}"
+            SHA="${{ steps.set-outputs-manual.outputs.sha }}"
+            echo "fuzzing_needed=${FUZZING_NEEDED:-true}" >> $GITHUB_OUTPUT
+            echo "sha=${SHA:-}" >> $GITHUB_OUTPUT
+            echo "is_manual_run=true" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Configure AWS credentials
+        if: github.event_name == 'schedule' && steps.set-outputs.outputs.fuzzing_needed == 'true'
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Check if production binary is available in S3
+        id: check-binary-scheduled
+        if: github.event_name == 'schedule' && steps.set-outputs.outputs.fuzzing_needed == 'true'
+        run: |
+          SHA="${{ steps.set-outputs.outputs.sha }}"
+          S3_KEY="solvers/z3/builds/production/${SHA}.tar.gz"
+          
+          if aws s3api head-object \
+            --bucket ${{ secrets.AWS_S3_BUCKET }} \
+            --key "$S3_KEY" >/dev/null 2>&1; then
+            echo "✅ Production binary available in S3 for commit ${SHA}"
+            echo "binary_available=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Production binary not found in S3 for commit ${SHA}"
+            echo "binary_available=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Set binary available for manual runs
+        id: check-binary-manual
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "binary_available=true" >> $GITHUB_OUTPUT
+      
+      - name: Set combined binary availability
+        id: check-binary
+        run: |
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            BINARY_AVAILABLE="${{ steps.check-binary-scheduled.outputs.binary_available }}"
+            echo "binary_available=${BINARY_AVAILABLE:-false}" >> $GITHUB_OUTPUT
+          else
+            BINARY_AVAILABLE="${{ steps.check-binary-manual.outputs.binary_available }}"
+            echo "binary_available=${BINARY_AVAILABLE:-true}" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Upload last fuzzed SHA artifact (keep fresh when no fuzzing needed)
+        if: github.event_name == 'schedule' && steps.set-outputs.outputs.fuzzing_needed == 'false'
+        run: |
+          mkdir -p .cache
+          if [ ! -f ".cache/z3_last_fuzzed_sha" ]; then
+            echo "${{ steps.set-outputs.outputs.sha }}" > .cache/z3_last_fuzzed_sha
+          fi
+      
+      - name: Upload last fuzzed SHA artifact
+        if: github.event_name == 'schedule' && steps.set-outputs.outputs.fuzzing_needed == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: z3-last-fuzzed-sha
+          path: .cache/z3_last_fuzzed_sha
+          retention-days: 30
+          if-no-files-found: ignore
+
+  skip-fuzzing:
+    needs: check-upstream
+    if: |
+      github.event_name == 'schedule' &&
+      (needs.check-upstream.outputs.fuzzing_needed == 'false' || needs.check-upstream.outputs.binary_available == 'false')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip fuzzing
+        run: |
+          if [ "${{ needs.check-upstream.outputs.fuzzing_needed }}" == "false" ]; then
+            echo "✅ Z3 is up to date - skipping fuzzing"
+          else
+            echo "❌ Production binary not available - skipping fuzzing"
+          fi
+
+  commit-fuzzer:
+    needs: check-upstream
+    if: |
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event_name == 'schedule' && needs.check-upstream.outputs.fuzzing_needed == 'true' && needs.check-upstream.outputs.binary_available == 'true')
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.extract-tests.outputs.matrix }}
+      total_tests: ${{ steps.extract-tests.outputs.total_tests }}
+      total_jobs: ${{ steps.extract-tests.outputs.total_jobs }}
+      commit_hash: ${{ steps.get-commit.outputs.commit_hash }}
+    permissions:
+      actions: read
+      contents: read
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      
+      - name: Install LLVM/Clang 17
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: '17'
+
+      - name: Add LLVM to PATH
+        run: echo "${{ env.LLVM_PATH }}/bin" >> $GITHUB_PATH
+
+      - name: Export LIBCLANG_PATH
+        run: echo "LIBCLANG_PATH=${{ env.LLVM_PATH }}/lib" >> $GITHUB_ENV
+
+      - name: Install system development packages
+        run: |
+          echo "Installing essential development packages..."
+          sudo apt-get update
+          
+          # Install ONLY GCC 14 and essential packages (remove conflicting versions)
+          sudo apt-get install -y \
+            build-essential \
+            libc6-dev \
+            gcc \
+            g++ \
+            binutils \
+            libstdc++-14-dev \
+            libc++-dev \
+            libc++abi-dev \
+            zlib1g \
+            zlib1g-dev
+          
+          echo "Installation completed"
+      
+      - name: Install Python dependencies
+        run: |
+          pip install gitpython unidiff "libclang==17.0.6"
+
+      - name: Clone z3test repository
+        run: |
+          if [ -d "z3test" ]; then
+            echo "z3test directory already exists, skipping clone"
+          else
+            git clone https://github.com/z3prover/z3test.git z3test
+          fi
+
+      - name: Clone Z3 repository
+        run: |
+          if [ -d "z3" ]; then
+            echo "Z3 directory already exists, skipping clone"
+          else
+            git clone https://github.com/Z3Prover/z3.git z3
+          fi
+
+      - name: Checkout specific commit
+        working-directory: z3
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ inputs.z3_commit_hash }}" ]; then
+            echo "🔨 Checking out provided commit: ${{ inputs.z3_commit_hash }}"
+            git fetch origin
+            git checkout ${{ inputs.z3_commit_hash }}
+          elif [ "${{ github.event_name }}" == "schedule" ]; then
+            echo "🔨 Checking out commit from upstream check: ${{ needs.check-upstream.outputs.sha }}"
+            git fetch origin
+            git checkout ${{ needs.check-upstream.outputs.sha }}
+          else
+            echo "Using current HEAD"
+          fi
+          echo "Checked out commit: $(git rev-parse HEAD)"
+
+      - name: Get Z3 commit hash
+        id: get-commit
+        working-directory: z3
+        run: |
+          COMMIT_HASH=$(git rev-parse HEAD)
+          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+          echo "Z3 commit hash: $COMMIT_HASH"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Download coverage binary from S3
+        id: download-coverage-binary
+        continue-on-error: true
+        run: |
+          mkdir -p artifacts
+          S3_KEY="solvers/z3/builds/coverage/${{ steps.get-commit.outputs.commit_hash }}.tar.gz"
+          
+          if aws s3api head-object \
+            --bucket ${{ secrets.AWS_S3_BUCKET }} \
+            --key "$S3_KEY" >/dev/null 2>&1; then
+            echo "📥 Downloading coverage binary from S3..."
+            aws s3 cp \
+              s3://${{ secrets.AWS_S3_BUCKET }}/$S3_KEY \
+              artifacts/artifacts.tar.gz
+            echo "binary_available=true" >> $GITHUB_OUTPUT
+          else
+            echo "WARNING: Coverage binary not found in S3, will build as fallback"
+            echo "binary_available=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract coverage binary, headers, and compile_commands.json
+        id: extract-coverage-binary
+        if: steps.download-coverage-binary.outputs.binary_available == 'true'
+        run: |
+          if [ -f "artifacts/artifacts.tar.gz" ]; then
+            ./scripts/z3/extract_build_artifacts.sh artifacts/artifacts.tar.gz z3/build true
+            if [ -f "z3/build/z3" ]; then
+              echo "✅ Coverage binary extracted successfully"
+            else
+              echo "⚠️ Binary extraction failed"
+              echo "binary_available=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "binary_available=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build z3 static binary with coverage (fallback)
+        run: |
+          if [ ! -f "z3/build/z3" ]; then
+            echo "🔨 Building Z3 static binary with coverage as fallback (binary not available from S3)"
+            # Set environment variables to ensure clang uses GCC 14 toolchain
+            export CXX="clang++ --gcc-toolchain=/usr"
+            export CC="clang --gcc-toolchain=/usr"
+            ./scripts/z3/build.sh --static --coverage
+          else
+            echo "✅ Using binary from S3, skipping build"
+          fi
+      
+      - name: Configure AWS credentials for coverage download
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Download coverage map from S3
+        id: download-coverage
+        run: |
+          if [ -n "${{ inputs.coverage_commit_hash }}" ]; then
+            # Use specified commit hash
+            COVERAGE_COMMIT="${{ inputs.coverage_commit_hash }}"
+            S3_KEY="solvers/z3/coverage-mappings/coverage_mapping-${COVERAGE_COMMIT}.json.gz"
+            
+            if aws s3api head-object \
+              --bucket ${{ secrets.AWS_S3_BUCKET }} \
+              --key "$S3_KEY" >/dev/null 2>&1; then
+              echo "📥 Downloading coverage mapping for commit: ${COVERAGE_COMMIT}"
+              aws s3 cp \
+                s3://${{ secrets.AWS_S3_BUCKET }}/$S3_KEY \
+                coverage_mapping.json.gz
+              echo "coverage_found=true" >> $GITHUB_OUTPUT
+            else
+              echo "❌ Coverage mapping not found for commit: ${COVERAGE_COMMIT}"
+              echo "coverage_found=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            # Find latest coverage mapping
+            echo "🔍 Finding latest coverage mapping in S3..."
+            LATEST=$(aws s3 ls s3://${{ secrets.AWS_S3_BUCKET }}/solvers/z3/coverage-mappings/ \
+              | grep "coverage_mapping-" \
+              | sort -r \
+              | head -n 1 \
+              | awk '{print $4}' || echo "")
+            
+            if [ -n "$LATEST" ]; then
+              echo "📥 Downloading latest coverage mapping: $LATEST"
+              aws s3 cp \
+                s3://${{ secrets.AWS_S3_BUCKET }}/solvers/z3/coverage-mappings/$LATEST \
+                coverage_mapping.json.gz
+              echo "coverage_found=true" >> $GITHUB_OUTPUT
+              echo "coverage_file=$LATEST" >> $GITHUB_OUTPUT
+            else
+              echo "❌ No coverage mappings found in S3"
+              echo "coverage_found=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+      
+      - name: Extract coverage map
+        if: steps.download-coverage.outputs.coverage_found == 'true'
+        run: |
+          gunzip coverage_mapping.json.gz
+          ls -la coverage_mapping.json
+          echo "✅ Coverage mapping extracted successfully"
+      
+      - name: Coverage mapping not found
+        if: steps.download-coverage.outputs.coverage_found != 'true'
+        run: |
+          echo "❌ Coverage mapping not found. Please run coverage mapper workflow first or specify a valid coverage_commit_hash."
+          exit 1
+
+      - name: Run Commit Fuzzer and create matrix
+        id: extract-tests
+        working-directory: z3
+        env:
+          SKIP_COVERAGE_ENFORCEMENT: "true"
+          MAX_JOBS: 10
+          Z3_COMMIT_HASH: ${{ steps.get-commit.outputs.commit_hash }}
+        run: |
+          # Run commit fuzzer with matrix output (1 commit instead of 50)
+          # Start with 10 jobs max (for testing)
+          # Tests per job is calculated dynamically to fit within MAX_JOBS
+          # To scale: change MAX_JOBS to 200+ (will automatically adjust tests_per_job)
+          ${{ github.workspace }}/scripts/z3/commit_fuzzer/run_prepare_commit_fuzzer.sh \
+            --python-script ${{ github.workspace }}/scripts/z3/commit_fuzzer/prepare_commit_fuzzer.py \
+            --coverage-file ../coverage_mapping.json \
+            --compile-commands build \
+            --output-matrix fuzzer_matrix.json \
+            --max-jobs $MAX_JOBS \
+            1
+          
+          if [ ! -f "fuzzer_matrix.json" ]; then
+            echo "No matrix file created, setting empty outputs"
+            echo "matrix={\"include\":[]}" >> $GITHUB_OUTPUT
+            echo "total_tests=0" >> $GITHUB_OUTPUT
+            echo "total_jobs=0" >> $GITHUB_OUTPUT
+            echo "No matrix file created, ending job"
+            exit 0
+          fi
+          
+          # Read matrix data and output to GitHub Actions
+          MATRIX=$(jq -c '.matrix' fuzzer_matrix.json)
+          TOTAL_TESTS=$(jq -r '.total_tests' fuzzer_matrix.json)
+          TOTAL_JOBS=$(jq -r '.total_jobs' fuzzer_matrix.json)
+          
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "total_tests=$TOTAL_TESTS" >> $GITHUB_OUTPUT
+          echo "total_jobs=$TOTAL_JOBS" >> $GITHUB_OUTPUT
+          
+          echo "Matrix created with $TOTAL_JOBS jobs for $TOTAL_TESTS tests"
+      
+      - name: Update last fuzzed SHA after successful fuzzing
+        if: github.event_name == 'schedule'
+        working-directory: z3
+        run: |
+          mkdir -p ../.cache
+          echo "$(git rev-parse HEAD)" > ../.cache/z3_last_fuzzed_sha
+      
+      - name: Upload last fuzzed SHA artifact
+        if: github.event_name == 'schedule'
+        uses: actions/upload-artifact@v4
+        with:
+          name: z3-last-fuzzed-sha
+          path: .cache/z3_last_fuzzed_sha
+          retention-days: 30
+          overwrite: true
+
+  fuzzer-jobs:
+    needs: commit-fuzzer
+    if: needs.commit-fuzzer.result == 'success' && needs.commit-fuzzer.outputs.total_tests != '' && needs.commit-fuzzer.outputs.total_tests != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.commit-fuzzer.outputs.matrix) }}
+    permissions:
+      actions: read
+      contents: read
+    
+    steps:
+      - name: Record job start time
+        run: echo "$(date +%s)" > /tmp/job_start_${GITHUB_RUN_ID}_${{ matrix.job_id }}.txt
+      
+      - name: Checkout
+        uses: actions/checkout@v5
+      
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 \
+            python3-pip \
+            unzip \
+            wget
+
+      - name: Install fuzzing dependencies
+        run: |
+          pip install antlr4-python3-runtime==4.9.2
+          pip install psutil requests
+          git clone https://github.com/testsmt/yinyang.git
+          cd yinyang
+          pip install -e .
+
+      - name: Install CVC5 oracle
+        run: |
+          python3 scripts/download_cvc5.py $HOME/.local/bin
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          cvc5 --version
+
+      - name: Download solver binaries
+        run: |
+          mkdir -p ${{ github.workspace }}/solvers
+          
+          # Download cvc4-1.6
+          wget -q https://cvc4.cs.stanford.edu/downloads/builds/x86_64-linux-opt/cvc4-1.6-x86_64-linux-opt \
+            -O ${{ github.workspace }}/solvers/cvc4-1.6
+          chmod +x ${{ github.workspace }}/solvers/cvc4-1.6
+          
+          # Download z3-4.8.7
+          wget -q https://github.com/Z3Prover/z3/releases/download/z3-4.8.7/z3-4.8.7-x64-ubuntu-16.04.zip -O /tmp/z3.zip
+          unzip -q /tmp/z3.zip -d /tmp
+          cp /tmp/z3-4.8.7-x64-ubuntu-16.04/bin/z3 ${{ github.workspace }}/solvers/z3-4.8.7
+          cp /tmp/z3-4.8.7-x64-ubuntu-16.04/bin/libz3.so ${{ github.workspace }}/solvers/
+          chmod +x ${{ github.workspace }}/solvers/z3-4.8.7
+          rm -rf /tmp/z3.zip /tmp/z3-4.8.7-x64-ubuntu-16.04
+
+      - name: Clone z3test repository
+        run: |
+          if [ -d "z3test" ]; then
+            echo "z3test directory already exists, skipping clone"
+          else
+            git clone https://github.com/z3prover/z3test.git z3test
+          fi
+
+      - name: Clone Z3 repository
+        run: |
+          if [ -d "z3" ]; then
+            echo "Z3 directory already exists, skipping clone"
+          else
+            git clone https://github.com/Z3Prover/z3.git z3
+          fi
+
+      - name: Checkout same commit as first job
+        working-directory: z3
+        run: |
+          git fetch origin
+          git checkout ${{ needs.commit-fuzzer.outputs.commit_hash }}
+          echo "Checked out commit: $(git rev-parse HEAD)"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Download production binary from S3
+        id: download-production-binary
+        continue-on-error: true
+        run: |
+          mkdir -p artifacts
+          S3_KEY="solvers/z3/builds/production/${{ needs.commit-fuzzer.outputs.commit_hash }}.tar.gz"
+          
+          if aws s3api head-object \
+            --bucket ${{ secrets.AWS_S3_BUCKET }} \
+            --key "$S3_KEY" >/dev/null 2>&1; then
+            echo "📥 Downloading production binary from S3..."
+            aws s3 cp \
+              s3://${{ secrets.AWS_S3_BUCKET }}/$S3_KEY \
+              artifacts/artifacts.tar.gz
+            echo "binary_available=true" >> $GITHUB_OUTPUT
+          else
+            echo "WARNING: Production binary not found in S3, will build as fallback"
+            echo "binary_available=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract production binary
+        id: extract-production-binary
+        if: steps.download-production-binary.outputs.binary_available == 'true'
+        run: |
+          if [ -f "artifacts/artifacts.tar.gz" ]; then
+            ./scripts/z3/extract_build_artifacts.sh artifacts/artifacts.tar.gz z3/build false
+            if [ -f "z3/build/z3" ]; then
+              echo "✅ Production binary extracted successfully"
+            else
+              echo "⚠️ Binary extraction failed"
+              echo "binary_available=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "binary_available=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build z3 static binary (fallback)
+        run: |
+          if [ ! -f "z3/build/z3" ]; then
+            echo "🔨 Building Z3 static binary as fallback (binary not available from S3)"
+            ./scripts/z3/build.sh --static
+          else
+            echo "✅ Using binary from S3, skipping build"
+          fi
+
+      - name: Verify solver binaries
+        run: |
+          ${{ github.workspace }}/solvers/cvc4-1.6 --version
+          ${{ github.workspace }}/solvers/z3-4.8.7 --version
+          cvc5 --version
+          ./build/z3 --version
+
+      - name: Run Simple Fuzzer on assigned tests
+        working-directory: z3
+        run: |
+          JOB_START=$(cat /tmp/job_start_${GITHUB_RUN_ID}_${{ matrix.job_id }}.txt)
+          
+          # Use provided stop_buffer_minutes or default 5 minutes
+          STOP_BUFFER=${{ inputs.stop_buffer_minutes || 5 }}
+          
+          ${{ github.workspace }}/scripts/z3/commit_fuzzer/simple_commit_fuzzer.py \
+            --tests-json '${{ toJson(matrix.tests) }}' \
+            --job-id '${{ matrix.job_id }}' \
+            --tests-root '../z3test/regressions' \
+            --job-start-time "$JOB_START" \
+            --stop-buffer-minutes ${STOP_BUFFER} \
+            --iterations 2147483647 \
+            --z3-old-path ${{ github.workspace }}/solvers/z3-4.8.7 \
+            --cvc4-path ${{ github.workspace }}/solvers/cvc4-1.6 \
+            --z3-path ./build/z3 \
+            --cvc5-path $HOME/.local/bin/cvc5
+      
+      - name: Upload bugs as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bugs-job-${{ matrix.job_id }}
+          path: z3/bugs
+          retention-days: 1
+          if-no-files-found: ignore
+
+  collect-bugs:
+    needs: [commit-fuzzer, fuzzer-jobs]
+    if: always() && needs.commit-fuzzer.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      
+      - name: Download all bug artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: bugs-artifacts
+          pattern: bugs-job-*
+          merge-multiple: false
+      
+      - name: Combine all bugs
+        id: combine-bugs
+        run: |
+          mkdir -p combined-bugs
+          
+          # Copy all bugs from all job artifacts
+          # Each artifact is in bugs-artifacts/bugs-job-{job_id}/bugs/
+          find bugs-artifacts -name "*.smt2" -type f -exec cp {} combined-bugs/ \;
+          
+          # Count bugs
+          BUG_COUNT=$(find combined-bugs -name "*.smt2" -type f 2>/dev/null | wc -l || echo "0")
+          echo "Total bugs found: $BUG_COUNT"
+          echo "bug_count=$BUG_COUNT" >> $GITHUB_OUTPUT
+          
+          if [ "$BUG_COUNT" -eq 0 ]; then
+            echo "No bugs found, skipping upload"
+            echo "bugs_found=false" >> $GITHUB_OUTPUT
+          else
+            echo "bugs_found=true" >> $GITHUB_OUTPUT
+            # List all bugs
+            echo "Bugs found:"
+            find combined-bugs -name "*.smt2" -type f | sort
+          fi
+      
+      - name: Create bugs archive
+        id: create-archive
+        if: steps.combine-bugs.outputs.bugs_found == 'true'
+        run: |
+          COMMIT_HASH="${{ needs.commit-fuzzer.outputs.commit_hash }}"
+          TIMESTAMP=$(date +%s)
+          ARCHIVE_NAME="bugs-${COMMIT_HASH}-${TIMESTAMP}.tar.gz"
+          cd combined-bugs
+          tar -czf ../${ARCHIVE_NAME} .
+          cd ..
+          ARCHIVE_SIZE=$(du -h ${ARCHIVE_NAME} | cut -f1)
+          echo "Created archive: ${ARCHIVE_NAME} ($ARCHIVE_SIZE)"
+          echo "archive_name=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
+      
+      - name: Configure AWS credentials
+        if: steps.combine-bugs.outputs.bugs_found == 'true'
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Upload bugs to S3
+        if: steps.combine-bugs.outputs.bugs_found == 'true'
+        run: |
+          ARCHIVE_NAME="${{ steps.create-archive.outputs.archive_name }}"
+          S3_KEY="solvers/z3/bugs/${ARCHIVE_NAME}"
+          
+          if [ ! -f "$ARCHIVE_NAME" ]; then
+            echo "❌ Error: Archive file not found: $ARCHIVE_NAME"
+            exit 1
+          fi
+          
+          aws s3 cp \
+            ${ARCHIVE_NAME} \
+            s3://${{ secrets.AWS_S3_BUCKET }}/${S3_KEY}
+          
+          echo "✅ Uploaded $ARCHIVE_NAME to S3"
+          echo "S3 path: s3://${{ secrets.AWS_S3_BUCKET }}/${S3_KEY}"
+          echo "Total bugs: ${{ steps.combine-bugs.outputs.bug_count }}"
+      
+      - name: No bugs found
+        if: steps.combine-bugs.outputs.bugs_found != 'true'
+        run: |
+          echo "✅ No bugs found in this run, skipping S3 upload"
+
