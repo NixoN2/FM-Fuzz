@@ -15,42 +15,36 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - job_name: z3-part1a
+          - job_name: z3-part1
             start_index: 1
-            end_index: 67
-          - job_name: z3-part1b
-            start_index: 68
-            end_index: 134
-          - job_name: z3-part1c
-            start_index: 135
-            end_index: 201
-          - job_name: z3-part1d
-            start_index: 202
-            end_index: 269
+            end_index: 114
           - job_name: z3-part2
-            start_index: 270
-            end_index: 538
+            start_index: 115
+            end_index: 227
           - job_name: z3-part3
-            start_index: 539
-            end_index: 807
-          - job_name: z3-part4a
-            start_index: 808
-            end_index: 852
-          - job_name: z3-part4b
-            start_index: 853
-            end_index: 897
-          - job_name: z3-part4c
-            start_index: 898
-            end_index: 942
-          - job_name: z3-part4d
-            start_index: 943
-            end_index: 987
-          - job_name: z3-part4e
-            start_index: 988
-            end_index: 1032
-          - job_name: z3-part4f
-            start_index: 1033
-            end_index: 1077
+            start_index: 228
+            end_index: 340
+          - job_name: z3-part4
+            start_index: 341
+            end_index: 453
+          - job_name: z3-part5
+            start_index: 454
+            end_index: 566
+          - job_name: z3-part6
+            start_index: 567
+            end_index: 679
+          - job_name: z3-part7
+            start_index: 680
+            end_index: 792
+          - job_name: z3-part8
+            start_index: 793
+            end_index: 905
+          - job_name: z3-part9
+            start_index: 906
+            end_index: 1019
+          - job_name: z3-part10
+            start_index: 1020
+            end_index: 1133
     
     steps:
       - name: Checkout

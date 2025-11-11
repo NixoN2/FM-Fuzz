@@ -113,12 +113,7 @@ class CoverageMapper:
                 # Skip .disabled files themselves (they are marker files, not test files)
                 if smt_file.name.endswith('.disabled'):
                     continue
-                
-                # Skip if there's a corresponding .disabled file (known failing tests)
-                disabled_file = smt_file.with_suffix(smt_file.suffix + '.disabled')
-                if disabled_file.exists():
-                    continue
-                
+                    
                 # Get relative path from z3test directory
                 rel_path = smt_file.relative_to(self.z3test_dir)
                 tests.append(str(rel_path))
@@ -186,6 +181,7 @@ class CoverageMapper:
                  "--solver-path", str(self.z3_binary),
                  "--solver-flags", "model_validate=true",
                  "--timeout", str(test_timeout),
+                 "--verbose",
                  str(smt_file)],
                 cwd=self.build_dir,
                 capture_output=True,
