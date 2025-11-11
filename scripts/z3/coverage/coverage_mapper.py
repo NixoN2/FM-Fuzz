@@ -137,108 +137,126 @@ class CoverageMapper:
         """Process a single test by running Z3 on SMT file and extract coverage data"""
         test_id, test_name = test_info
         
-        # Clear existing .gcda files before running test
-        for gcda in self.build_dir.rglob("*.gcda"):
-            gcda.unlink()
-        
-        # Reset coverage counters
-        self.reset_coverage_counters()
-        
-        # Get full path to SMT file
-        smt_file = self.z3test_dir / test_name
-        
-        if not smt_file.exists():
-            print(f"⚠️ Test file not found: {smt_file}")
-            sys.stdout.flush()
-            return None
-        
-        # Check if CVC5 is available
-        if not self.cvc5_binary or not self.cvc5_binary.exists():
-            print(f"⚠️ CVC5 not found, cannot use oracle. Install with: pip install cvc5")
-            sys.stdout.flush()
-            return None
-        
-        # Get oracle script path (scripts/oracle.py from scripts/z3/coverage/coverage_mapper.py)
-        # __file__ = scripts/z3/coverage/coverage_mapper.py
-        # parent.parent.parent = scripts/
-        oracle_script = Path(__file__).parent.parent.parent / "oracle.py"
-        if not oracle_script.exists():
-            print(f"⚠️ Oracle script not found: {oracle_script}")
-            sys.stdout.flush()
-            return None
-        
-        # Early skip for unsupported commands (before running solvers)
-        # Import check function from oracle module
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("oracle", oracle_script)
-        oracle_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(oracle_module)
-        if oracle_module.check_has_unsupported_commands(smt_file):
-            print(f"⏭️ {test_name} - uses unsupported commands (skipping)")
-            sys.stdout.flush()
-            return None
-        
-        # Measure test execution time
-        start_time = time.time()
-        
-        # Set timeout to 120 seconds (2 minutes) to skip long-running tests
-        test_timeout = 120
-        
-        # Use oracle to run both CVC5 (reference) and Z3 and compare results
         try:
-            result = subprocess.run(
-                ["python3", str(oracle_script),
-                 "--cvc5-path", str(self.cvc5_binary),
-                 "--solver-path", str(self.z3_binary),
-                 "--solver-flags", "model_validate=true",
-                 "--timeout", str(test_timeout),
-                 "--verbose",
-                 str(smt_file)],
-                cwd=self.build_dir,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=test_timeout * 2  # Oracle runs both solvers, so double timeout
-            )
-        except subprocess.TimeoutExpired:
-            print(f"⏱️ {test_name} - timeout after {test_timeout * 2}s (skipping)")
+            # Clear existing .gcda files before running test
+            for gcda in self.build_dir.rglob("*.gcda"):
+                gcda.unlink()
+            
+            # Reset coverage counters
+            self.reset_coverage_counters()
+            
+            # Get full path to SMT file
+            smt_file = self.z3test_dir / test_name
+            
+            if not smt_file.exists():
+                print(f"⚠️ Test file not found: {smt_file}")
+                sys.stdout.flush()
+                return None
+            
+            # Check if CVC5 is available
+            if not self.cvc5_binary or not self.cvc5_binary.exists():
+                print(f"⚠️ CVC5 not found, cannot use oracle. Install with: pip install cvc5")
+                sys.stdout.flush()
+                return None
+            
+            # Get oracle script path (scripts/oracle.py from scripts/z3/coverage/coverage_mapper.py)
+            # __file__ = scripts/z3/coverage/coverage_mapper.py
+            # parent.parent.parent = scripts/
+            oracle_script = Path(__file__).parent.parent.parent / "oracle.py"
+            if not oracle_script.exists():
+                print(f"⚠️ Oracle script not found: {oracle_script}")
+                sys.stdout.flush()
+                return None
+            
+            # Early skip for unsupported commands (before running solvers)
+            # Import check function from oracle module
+            try:
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("oracle", oracle_script)
+                oracle_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(oracle_module)
+                if oracle_module.check_has_unsupported_commands(smt_file):
+                    print(f"⏭️ {test_name} - uses unsupported commands (skipping)")
+                    sys.stdout.flush()
+                    return None
+            except Exception:
+                # If we can't check for unsupported commands, continue anyway
+                pass
+            
+            # Measure test execution time
+            start_time = time.time()
+            
+            # Set timeout to 120 seconds (2 minutes) to skip long-running tests
+            test_timeout = 120
+            
+            # Use oracle to run both CVC5 (reference) and Z3 and compare results
+            try:
+                result = subprocess.run(
+                    ["python3", str(oracle_script),
+                     "--cvc5-path", str(self.cvc5_binary),
+                     "--solver-path", str(self.z3_binary),
+                     "--solver-flags", "model_validate=true",
+                     "--timeout", str(test_timeout),
+                     "--verbose",
+                     str(smt_file)],
+                    cwd=self.build_dir,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=test_timeout * 2  # Oracle runs both solvers, so double timeout
+                )
+            except subprocess.TimeoutExpired:
+                print(f"⏱️ {test_name} - timeout after {test_timeout * 2}s (skipping)")
+                sys.stdout.flush()
+                return None
+            except Exception as e:
+                print(f"⚠️ {test_name} - error running oracle: {e} (skipping)")
+                sys.stdout.flush()
+                return None
+            
+            end_time = time.time()
+            execution_time = round(end_time - start_time, 2)
+            
+            # Skip tests that fail (exit code != 0 means solvers disagree or error)
+            if result.returncode != 0:
+                print(f"⚠️ {test_name} - oracle exit code {result.returncode} - {execution_time}s (skipping)")
+                # Print all oracle output for debugging (verbose mode shows solver results)
+                if result.stdout:
+                    oracle_lines = result.stdout.strip().split('\n')
+                    for line in oracle_lines:
+                        if line.strip():
+                            print(f"   {line}")
+                if result.stderr:
+                    oracle_lines = result.stderr.strip().split('\n')
+                    for line in oracle_lines:
+                        if line.strip():
+                            print(f"   {line}")
+                sys.stdout.flush()
+                return None
+            
+            # Log successful test (oracle confirmed solvers agree)
+            print(f"✅ {test_name} - {execution_time}s")
+            
+            # Extract coverage data only for successful tests
+            try:
+                coverage_data = self.extract_coverage_data(test_name)
+                if coverage_data:
+                    print(f"   → {len(coverage_data['functions'])} functions covered")
+                sys.stdout.flush()
+                
+                # Clean up memory after each test
+                self.cleanup_memory()
+                
+                return coverage_data
+            except Exception as e:
+                print(f"⚠️ {test_name} - failed to extract coverage: {e} (skipping)")
+                sys.stdout.flush()
+                return None
+        except Exception as e:
+            # Catch any unexpected errors and return None (test will be skipped)
+            print(f"⚠️ {test_name} - unexpected error: {e} (skipping)")
             sys.stdout.flush()
             return None
-        
-        end_time = time.time()
-        execution_time = round(end_time - start_time, 2)
-        
-        # Skip tests that fail (exit code != 0 means solvers disagree or error)
-        if result.returncode != 0:
-            print(f"⚠️ {test_name} - oracle exit code {result.returncode} - {execution_time}s (skipping)")
-            # Print all oracle output for debugging (verbose mode shows solver results)
-            if result.stdout:
-                oracle_lines = result.stdout.strip().split('\n')
-                for line in oracle_lines:
-                    if line.strip():
-                        print(f"   {line}")
-            if result.stderr:
-                oracle_lines = result.stderr.strip().split('\n')
-                for line in oracle_lines:
-                    if line.strip():
-                        print(f"   {line}")
-            sys.stdout.flush()
-            return None
-        
-        # Log successful test (oracle confirmed solvers agree)
-        print(f"✅ {test_name} - {execution_time}s")
-        
-        # Extract coverage data only for successful tests
-        coverage_data = self.extract_coverage_data(test_name)
-        
-        if coverage_data:
-            print(f"   → {len(coverage_data['functions'])} functions covered")
-        sys.stdout.flush()
-        
-        # Clean up memory after each test
-        self.cleanup_memory()
-        
-        return coverage_data
 
     def extract_coverage_data(self, test_name: str) -> Optional[Dict]:
         """Extract coverage data using fastcov"""
@@ -346,18 +364,24 @@ class CoverageMapper:
                 print(f"💾 Memory usage: {memory_mb:.1f}MB")
                 sys.stdout.flush()
             
-            result = self.process_single_test(test_info)
-            if result:
-                # Add to mapping immediately and don't keep in memory
-                test_name = result["test_name"]
-                for func in result["functions"]:
-                    if func not in function_to_tests:
-                        function_to_tests[func] = []
-                    function_to_tests[func].append(test_name)
-                
-                # Write intermediate results every 100 tests to avoid losing progress
-                if i % 100 == 0:
-                    self.write_intermediate_mapping(function_to_tests, temp_file)
+            try:
+                result = self.process_single_test(test_info)
+                if result:
+                    # Add to mapping immediately and don't keep in memory
+                    test_name = result["test_name"]
+                    for func in result["functions"]:
+                        if func not in function_to_tests:
+                            function_to_tests[func] = []
+                        function_to_tests[func].append(test_name)
+                    
+                    # Write intermediate results every 100 tests to avoid losing progress
+                    if i % 100 == 0:
+                        self.write_intermediate_mapping(function_to_tests, temp_file)
+            except Exception as e:
+                # Catch any unexpected errors and continue processing
+                print(f"⚠️ {test_name} - unexpected error: {e} (skipping)")
+                sys.stdout.flush()
+                continue
         
         # Write final mapping
         self.write_intermediate_mapping(function_to_tests, temp_file)
