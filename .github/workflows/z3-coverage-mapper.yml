@@ -75,13 +75,9 @@ jobs:
       
       - name: Install CVC5 oracle
         run: |
-          # Download latest CVC5 binary from GitHub releases
-          ./scripts/download_cvc5.sh $HOME/.local/bin
-          
-          # Add to PATH for subsequent steps
+          pip install requests
+          python3 scripts/download_cvc5.py $HOME/.local/bin
           echo "$HOME/.local/bin" >> $GITHUB_PATH
-          
-          # Verify installation
           cvc5 --version
       
       - name: Build Z3 with coverage
