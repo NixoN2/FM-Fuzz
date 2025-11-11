@@ -17,10 +17,21 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 class CoverageMapper:
-    def __init__(self, build_dir: str = "build", z3test_dir: str = "z3test"):
+    def __init__(self, build_dir: str = "build", z3test_dir: str = "z3test", cvc5_path: Optional[str] = None):
         self.build_dir = Path(build_dir)
         self.z3test_dir = Path(z3test_dir)
         self.z3_binary = self.build_dir / "z3"
+        # CVC5 path - use provided path or try to find cvc5 in PATH
+        if cvc5_path:
+            self.cvc5_binary = Path(cvc5_path)
+        else:
+            # Try to find cvc5 in PATH (from pip install)
+            import shutil
+            cvc5_in_path = shutil.which("cvc5")
+            if cvc5_in_path:
+                self.cvc5_binary = Path(cvc5_in_path)
+            else:
+                self.cvc5_binary = None
         # Cache for demangled names to avoid repeated subprocess calls
         self.demangle_cache = {}
         # Memory monitoring
@@ -146,60 +157,60 @@ class CoverageMapper:
             sys.stdout.flush()
             return None
         
-        # Check if .expected.out file exists
-        expected_out_file = smt_file.with_suffix(smt_file.suffix + '.expected.out')
-        use_test_benchmark = expected_out_file.exists()
+        # Check if CVC5 is available
+        if not self.cvc5_binary or not self.cvc5_binary.exists():
+            print(f"⚠️ CVC5 not found, cannot use oracle. Install with: pip install cvc5")
+            sys.stdout.flush()
+            return None
+        
+        # Get oracle script path (scripts/oracle.py from scripts/z3/coverage/coverage_mapper.py)
+        # __file__ = scripts/z3/coverage/coverage_mapper.py
+        # parent.parent.parent = scripts/
+        oracle_script = Path(__file__).parent.parent.parent / "oracle.py"
+        if not oracle_script.exists():
+            print(f"⚠️ Oracle script not found: {oracle_script}")
+            sys.stdout.flush()
+            return None
         
         # Measure test execution time
         start_time = time.time()
         
-        if use_test_benchmark:
-            # Use test_benchmark.py if .expected.out exists
-            test_benchmark_script = self.z3test_dir / "scripts" / "test_benchmark.py"
-            
-            if not test_benchmark_script.exists():
-                print(f"⚠️ test_benchmark.py not found: {test_benchmark_script}")
-                sys.stdout.flush()
-                return None
-            
-            # Run test using test_benchmark.py script
+        # Set timeout to 120 seconds (2 minutes) to skip long-running tests
+        test_timeout = 120
+        
+        # Use oracle to run both CVC5 (reference) and Z3 and compare results
+        try:
             result = subprocess.run(
-                ["python3", str(test_benchmark_script), str(self.z3_binary), str(smt_file)],
+                ["python3", str(oracle_script),
+                 "--cvc5-path", str(self.cvc5_binary),
+                 "--solver-path", str(self.z3_binary),
+                 "--solver-flags", "model_validate=true",
+                 "--timeout", str(test_timeout),
+                 str(smt_file)],
                 cwd=self.build_dir,
                 capture_output=True,
                 text=True,
-                check=False
+                check=False,
+                timeout=test_timeout * 2  # Oracle runs both solvers, so double timeout
             )
-        else:
-            # Run Z3 directly if no .expected.out file (skip validation)
-            # Add model_validate=true flag (test_benchmark.py does this automatically)
-            result = subprocess.run(
-                [str(self.z3_binary), "model_validate=true", str(smt_file)],
-                cwd=self.build_dir,
-                capture_output=True,
-                text=True,
-                check=False
-            )
+        except subprocess.TimeoutExpired:
+            print(f"⏱️ {test_name} - timeout after {test_timeout * 2}s (skipping)")
+            sys.stdout.flush()
+            return None
         
         end_time = time.time()
         execution_time = round(end_time - start_time, 2)
         
-        # Log result
-        if use_test_benchmark:
-            # test_benchmark.py returns 0 on success, 1 on failure
-            if result.returncode == 0:
-                print(f"✅ {test_name} - {execution_time}s")
-            else:
-                print(f"⚠️ {test_name} - exit code {result.returncode} - {execution_time}s")
-        else:
-            # Z3 direct execution - log but don't treat as failure
-            # Z3 returns 0 for sat/unsat (successful completion), non-zero for errors
-            if result.returncode == 0:
-                print(f"✅ {test_name} (no .expected.out) - {execution_time}s")
-            else:
-                print(f"⚠️ {test_name} (no .expected.out) - exit code {result.returncode} - {execution_time}s")
+        # Skip tests that fail (exit code != 0 means solvers disagree or error)
+        if result.returncode != 0:
+            print(f"⚠️ {test_name} - oracle exit code {result.returncode} - {execution_time}s (skipping)")
+            sys.stdout.flush()
+            return None
         
-        # Extract coverage data
+        # Log successful test (oracle confirmed solvers agree)
+        print(f"✅ {test_name} - {execution_time}s")
+        
+        # Extract coverage data only for successful tests
         coverage_data = self.extract_coverage_data(test_name)
         
         if coverage_data:
@@ -389,6 +400,7 @@ def main():
     parser = argparse.ArgumentParser(description='Coverage Mapper for Z3')
     parser.add_argument('--build-dir', default='build', help='Build directory path')
     parser.add_argument('--z3test-dir', default='z3test', help='Z3 test repository directory path')
+    parser.add_argument('--cvc5-path', help='Path to CVC5 binary (default: use cvc5 from PATH)')
     parser.add_argument('--max-tests', type=int, help='Maximum number of tests to process')
     parser.add_argument('--test-pattern', help='Filter tests by pattern')
     parser.add_argument('--start-index', type=int, help='Start index for test range (1-based)')
@@ -396,7 +408,7 @@ def main():
     
     args = parser.parse_args()
     
-    mapper = CoverageMapper(args.build_dir, args.z3test_dir)
+    mapper = CoverageMapper(args.build_dir, args.z3test_dir, args.cvc5_path)
     mapper.run(max_tests=args.max_tests, test_pattern=args.test_pattern, 
                start_index=args.start_index, end_index=args.end_index)
 

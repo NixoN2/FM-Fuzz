@@ -292,7 +292,7 @@ class SimpleCommitFuzzer:
         cmd = [
             "typefuzz",
             "-i", str(self.iterations),
-            "--timeout", "15",
+            "--timeout", "120",
             "--bugs", str(bugs_folder),
             "--scratch", str(scratch_folder),
             "--logfolder", str(log_folder),

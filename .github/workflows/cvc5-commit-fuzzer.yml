@@ -16,9 +16,122 @@ on:
         required: false
         type: number
         default: 5
+  schedule:
+    - cron: '30 * * * *'  # Run at 30 minutes past every hour (0:30, 1:30, 2:30, etc.)
 
 jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      fuzzing_needed: ${{ steps.set-outputs.outputs.fuzzing_needed }}
+      sha: ${{ steps.set-outputs.outputs.sha }}
+      is_manual_run: ${{ steps.set-outputs.outputs.is_manual_run }}
+      binary_available: ${{ steps.check-binary.outputs.binary_available }}
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      
+      - name: Download last fuzzed SHA from artifacts
+        if: github.event_name == 'schedule'
+        uses: dawidd6/action-download-artifact@v6
+        id: download-sha
+        continue-on-error: true
+        with:
+          name: cvc5-last-fuzzed-sha
+          path: .cache
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: cvc5-commit-fuzzer.yml
+      
+      - name: Check upstream for new commits
+        id: set-outputs
+        if: github.event_name == 'schedule'
+        run: |
+          echo "📥 Checking for upstream changes..."
+          # Ensure .cache directory exists
+          mkdir -p .cache
+          ./scripts/check-upstream.sh cvc5 https://github.com/cvc5/cvc5.git
+          echo "fuzzing_needed=$(cat .build_status | grep build_needed | cut -d'=' -f2)" >> $GITHUB_OUTPUT
+          echo "sha=$(cat .build_status | grep sha | cut -d'=' -f2)" >> $GITHUB_OUTPUT
+          echo "is_manual_run=false" >> $GITHUB_OUTPUT
+      
+      - name: Set manual run outputs
+        id: set-outputs
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "🔨 Manual run triggered"
+          echo "fuzzing_needed=true" >> $GITHUB_OUTPUT
+          echo "sha=${{ inputs.cvc5_commit_hash }}" >> $GITHUB_OUTPUT
+          echo "is_manual_run=true" >> $GITHUB_OUTPUT
+      
+      - name: Configure AWS credentials
+        if: github.event_name == 'schedule' && steps.set-outputs.outputs.fuzzing_needed == 'true'
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Check if production binary is available in S3
+        id: check-binary
+        if: github.event_name == 'schedule' && steps.set-outputs.outputs.fuzzing_needed == 'true'
+        run: |
+          SHA="${{ steps.set-outputs.outputs.sha }}"
+          S3_KEY="solvers/cvc5/builds/production/${SHA}.tar.gz"
+          
+          if aws s3api head-object \
+            --bucket ${{ secrets.AWS_S3_BUCKET }} \
+            --key "$S3_KEY" >/dev/null 2>&1; then
+            echo "✅ Production binary available in S3 for commit ${SHA}"
+            echo "binary_available=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Production binary not found in S3 for commit ${SHA}"
+            echo "binary_available=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Set binary available for manual runs
+        id: check-binary
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "binary_available=true" >> $GITHUB_OUTPUT
+      
+      - name: Upload last fuzzed SHA artifact (keep fresh when no fuzzing needed)
+        if: github.event_name == 'schedule' && steps.set-outputs.outputs.fuzzing_needed == 'false'
+        run: |
+          mkdir -p .cache
+          if [ ! -f ".cache/cvc5_last_fuzzed_sha" ]; then
+            echo "${{ steps.set-outputs.outputs.sha }}" > .cache/cvc5_last_fuzzed_sha
+          fi
+      
+      - name: Upload last fuzzed SHA artifact
+        if: github.event_name == 'schedule' && steps.set-outputs.outputs.fuzzing_needed == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cvc5-last-fuzzed-sha
+          path: .cache/cvc5_last_fuzzed_sha
+          retention-days: 30
+          if-no-files-found: ignore
+
+  skip-fuzzing:
+    needs: check-upstream
+    if: |
+      github.event_name == 'schedule' &&
+      (needs.check-upstream.outputs.fuzzing_needed == 'false' || needs.check-upstream.outputs.binary_available == 'false')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip fuzzing
+        run: |
+          if [ "${{ needs.check-upstream.outputs.fuzzing_needed }}" == "false" ]; then
+            echo "✅ CVC5 is up to date - skipping fuzzing"
+          else
+            echo "❌ Production binary not available - skipping fuzzing"
+          fi
+
   commit-fuzzer:
+    needs: check-upstream
+    if: |
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event_name == 'schedule' && needs.check-upstream.outputs.fuzzing_needed == 'true' && needs.check-upstream.outputs.binary_available == 'true')
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.extract-tests.outputs.matrix }}
@@ -76,13 +189,20 @@ jobs:
             git clone https://github.com/cvc5/cvc5.git cvc5
           fi
 
-      - name: Checkout specific commit if provided
-        if: inputs.cvc5_commit_hash != ''
+      - name: Checkout specific commit
         working-directory: cvc5
         run: |
-          echo "🔨 Checking out provided commit: ${{ inputs.cvc5_commit_hash }}"
-          git fetch origin
-          git checkout ${{ inputs.cvc5_commit_hash }}
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ inputs.cvc5_commit_hash }}" ]; then
+            echo "🔨 Checking out provided commit: ${{ inputs.cvc5_commit_hash }}"
+            git fetch origin
+            git checkout ${{ inputs.cvc5_commit_hash }}
+          elif [ "${{ github.event_name }}" == "schedule" ]; then
+            echo "🔨 Checking out commit from upstream check: ${{ needs.check-upstream.outputs.sha }}"
+            git fetch origin
+            git checkout ${{ needs.check-upstream.outputs.sha }}
+          else
+            echo "Using current HEAD"
+          fi
           echo "Checked out commit: $(git rev-parse HEAD)"
 
       - name: Get CVC5 commit hash
@@ -249,6 +369,22 @@ jobs:
           echo "total_jobs=$TOTAL_JOBS" >> $GITHUB_OUTPUT
           
           echo "Matrix created with $TOTAL_JOBS jobs for $TOTAL_TESTS tests"
+      
+      - name: Update last fuzzed SHA after successful fuzzing
+        if: github.event_name == 'schedule'
+        working-directory: cvc5
+        run: |
+          mkdir -p ../.cache
+          echo "$(git rev-parse HEAD)" > ../.cache/cvc5_last_fuzzed_sha
+      
+      - name: Upload last fuzzed SHA artifact
+        if: github.event_name == 'schedule'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cvc5-last-fuzzed-sha
+          path: .cache/cvc5_last_fuzzed_sha
+          retention-days: 30
+          overwrite: true
 
   fuzzer-jobs:
     needs: commit-fuzzer
@@ -380,12 +516,16 @@ jobs:
         working-directory: cvc5
         run: |
           JOB_START=$(cat /tmp/job_start_${GITHUB_RUN_ID}_${{ matrix.job_id }}.txt)
+          
+          # Use provided stop_buffer_minutes or default 5 minutes
+          STOP_BUFFER=${{ inputs.stop_buffer_minutes || 5 }}
+          
           ${{ github.workspace }}/scripts/cvc5/commit_fuzzer/simple_commit_fuzzer.py \
             --tests-json '${{ toJson(matrix.tests) }}' \
             --job-id '${{ matrix.job_id }}' \
             --tests-root 'test/regress/cli' \
             --job-start-time "$JOB_START" \
-            --stop-buffer-minutes ${{ inputs.stop_buffer_minutes || 5 }} \
+            --stop-buffer-minutes ${STOP_BUFFER} \
             --iterations 2147483647 \
             --z3-old-path ${{ github.workspace }}/solvers/z3-4.8.7 \
             --cvc4-path ${{ github.workspace }}/solvers/cvc4-1.6 \

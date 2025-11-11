@@ -79,6 +79,11 @@ jobs:
             git clone https://github.com/z3prover/z3test.git z3test
           fi
       
+      - name: Install CVC5 oracle
+        run: |
+          pip install cvc5==1.3.1
+          cvc5 --version
+      
       - name: Build Z3 with coverage
         run: |
           ./scripts/z3/build.sh --coverage
