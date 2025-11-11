@@ -158,6 +158,19 @@ class CoverageMapper:
             sys.stdout.flush()
             return None
         
+        # Early skip for unsupported commands (before running solvers)
+        # Import check function from oracle module
+        oracle_module_path = Path(__file__).parent.parent.parent / "oracle.py"
+        if oracle_module_path.exists():
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("oracle", oracle_module_path)
+            oracle_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(oracle_module)
+            if oracle_module.check_has_unsupported_commands(smt_file):
+                print(f"⏭️ {test_name} - uses unsupported commands (skipping)")
+                sys.stdout.flush()
+                return None
+        
         # Get oracle script path (scripts/oracle.py from scripts/z3/coverage/coverage_mapper.py)
         # __file__ = scripts/z3/coverage/coverage_mapper.py
         # parent.parent.parent = scripts/
