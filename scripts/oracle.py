@@ -20,7 +20,12 @@ from pathlib import Path
 from typing import Tuple, List
 
 def extract_result(output: str, stderr: str = "", exit_code: int = 0) -> str:
-    """Extract SMT result from solver output. Prioritizes output over exit codes."""
+    """
+    Extract SMT result from solver output. Prioritizes output over exit codes.
+    Exit codes are ignored - solvers may exit with non-zero codes due to warnings
+    but still produce valid results (sat/unsat) in their output.
+    Only uses exit_code=124 to detect timeouts when no result is found in output.
+    """
     combined = (output + "\n" + stderr).lower()
     
     # Check for exact matches first, then word boundaries
@@ -37,6 +42,7 @@ def extract_result(output: str, stderr: str = "", exit_code: int = 0) -> str:
     if re.search(r'(^|\s)unknown(\s|$)', combined):
         return 'unknown'
     
+    # Only use exit code for timeout detection when no result found in output
     return 'timeout' if exit_code == 124 else 'error'
 
 def check_has_set_logic(test_file: Path) -> bool:
@@ -115,6 +121,11 @@ def main():
     if cvc5_result in valid_results or solver_result in valid_results:
         if args.verbose:
             print(f"⚠️ CVC5={cvc5_result}, Solver={solver_result}")
+            # Show error output for the failing solver
+            if cvc5_result == 'error' and cvc5_stderr:
+                print(f"CVC5 error: {cvc5_stderr[:500]}")
+            if solver_result == 'error' and solver_stderr:
+                print(f"Solver error: {solver_stderr[:500]}")
         sys.exit(1)
     
     # Handle timeouts and errors
@@ -126,10 +137,10 @@ def main():
     if 'error' in (cvc5_result, solver_result):
         if args.verbose:
             print("❌ One or both solvers encountered an error")
-            if cvc5_stderr:
-                print(f"CVC5 stderr: {cvc5_stderr[:200]}")
-            if solver_stderr:
-                print(f"Solver stderr: {solver_stderr[:200]}")
+            if cvc5_result == 'error' and cvc5_stderr:
+                print(f"CVC5 error: {cvc5_stderr[:500]}")
+            if solver_result == 'error' and solver_stderr:
+                print(f"Solver error: {solver_stderr[:500]}")
         sys.exit(1)
     
     # Non-standard results
