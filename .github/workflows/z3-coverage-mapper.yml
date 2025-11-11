@@ -82,10 +82,31 @@ jobs:
       - name: Install CVC5 oracle
         run: |
           pip install cvc5
-          # Add pip user install bin directory to PATH for subsequent steps
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-          # Verify installation (use full path since PATH update takes effect in next step)
-          $HOME/.local/bin/cvc5 --version
+          # Find where pip installed cvc5
+          CVC5_PATH=$(python3 -m pip show -f cvc5 | grep -E "^\s+Location:" | awk '{print $2}')/cvc5/bin/cvc5
+          if [ -f "$CVC5_PATH" ]; then
+            echo "Found cvc5 at: $CVC5_PATH"
+            # Create symlink in a directory that's in PATH
+            mkdir -p $HOME/.local/bin
+            ln -sf "$CVC5_PATH" $HOME/.local/bin/cvc5
+            echo "$HOME/.local/bin" >> $GITHUB_PATH
+            $HOME/.local/bin/cvc5 --version
+          else
+            # Try alternative location
+            CVC5_PATH=$(python3 -c "import cvc5; import os; print(os.path.join(os.path.dirname(cvc5.__file__), 'bin', 'cvc5'))")
+            if [ -f "$CVC5_PATH" ]; then
+              echo "Found cvc5 at: $CVC5_PATH"
+              mkdir -p $HOME/.local/bin
+              ln -sf "$CVC5_PATH" $HOME/.local/bin/cvc5
+              echo "$HOME/.local/bin" >> $GITHUB_PATH
+              $HOME/.local/bin/cvc5 --version
+            else
+              echo "Error: cvc5 binary not found. Searching..."
+              find $HOME/.local -name cvc5 -type f 2>/dev/null || true
+              python3 -m pip show -f cvc5
+              exit 1
+            fi
+          fi
       
       - name: Build Z3 with coverage
         run: |
