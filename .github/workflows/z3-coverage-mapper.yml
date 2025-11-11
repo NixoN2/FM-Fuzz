@@ -81,8 +81,11 @@ jobs:
       
       - name: Install CVC5 oracle
         run: |
-          pip install cvc5==1.3.1
-          cvc5 --version
+          pip install cvc5
+          # Add pip user install bin directory to PATH for subsequent steps
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          # Verify installation (use full path since PATH update takes effect in next step)
+          $HOME/.local/bin/cvc5 --version
       
       - name: Build Z3 with coverage
         run: |
