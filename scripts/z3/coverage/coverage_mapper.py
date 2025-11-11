@@ -137,6 +137,15 @@ class CoverageMapper:
         """Process a single test by running Z3 on SMT file and extract coverage data"""
         test_id, test_name = test_info
         
+        # Skip known problematic tests (timeout, crashes, etc.)
+        SKIP_TESTS = [
+            'regressions/smt2/5731.smt2',  # Times out with expensive regex constraints
+        ]
+        if test_name in SKIP_TESTS:
+            print(f"⏭️ {test_name} - skipped (known problematic test)")
+            sys.stdout.flush()
+            return None
+        
         try:
             # Clear existing .gcda files before running test
             for gcda in self.build_dir.rglob("*.gcda"):
