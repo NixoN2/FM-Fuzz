@@ -121,11 +121,17 @@ def main():
     if cvc5_result in valid_results or solver_result in valid_results:
         if args.verbose:
             print(f"⚠️ CVC5={cvc5_result}, Solver={solver_result}")
-            # Show error output for the failing solver
-            if cvc5_result == 'error' and cvc5_stderr:
-                print(f"CVC5 error: {cvc5_stderr[:500]}")
-            if solver_result == 'error' and solver_stderr:
-                print(f"Solver error: {solver_stderr[:500]}")
+            # Show all output for the failing solver
+            if cvc5_result == 'error':
+                if cvc5_stdout.strip():
+                    print(f"CVC5 stdout:\n{cvc5_stdout}")
+                if cvc5_stderr.strip():
+                    print(f"CVC5 stderr:\n{cvc5_stderr}")
+            if solver_result == 'error':
+                if solver_stdout.strip():
+                    print(f"Solver stdout:\n{solver_stdout}")
+                if solver_stderr.strip():
+                    print(f"Solver stderr:\n{solver_stderr}")
         sys.exit(1)
     
     # Handle timeouts and errors
@@ -137,10 +143,16 @@ def main():
     if 'error' in (cvc5_result, solver_result):
         if args.verbose:
             print("❌ One or both solvers encountered an error")
-            if cvc5_result == 'error' and cvc5_stderr:
-                print(f"CVC5 error: {cvc5_stderr[:500]}")
-            if solver_result == 'error' and solver_stderr:
-                print(f"Solver error: {solver_stderr[:500]}")
+            if cvc5_result == 'error':
+                if cvc5_stdout.strip():
+                    print(f"CVC5 stdout:\n{cvc5_stdout}")
+                if cvc5_stderr.strip():
+                    print(f"CVC5 stderr:\n{cvc5_stderr}")
+            if solver_result == 'error':
+                if solver_stdout.strip():
+                    print(f"Solver stdout:\n{solver_stdout}")
+                if solver_stderr.strip():
+                    print(f"Solver stderr:\n{solver_stderr}")
         sys.exit(1)
     
     # Non-standard results
