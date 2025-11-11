@@ -217,6 +217,12 @@ class CoverageMapper:
             end_time = time.time()
             execution_time = round(end_time - start_time, 2)
             
+            # Handle timeout exit codes (143 = SIGTERM, often from external timeout)
+            if result.returncode == 143:
+                print(f"⏱️ {test_name} - process terminated (SIGTERM/timeout) - {execution_time}s (skipping)")
+                sys.stdout.flush()
+                return None
+            
             # Skip tests that fail (exit code != 0 means solvers disagree or error)
             if result.returncode != 0:
                 print(f"⚠️ {test_name} - oracle exit code {result.returncode} - {execution_time}s (skipping)")

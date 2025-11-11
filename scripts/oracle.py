@@ -54,10 +54,13 @@ def extract_result(output: str, stderr: str = "", exit_code: int = 0) -> str:
     Returns: 'sat', 'unsat', 'unknown', 'error', or 'timeout'
     
     Uses regex to match 'sat', 'unsat', or 'unknown' on their own lines (like grep_result).
-    Handles multiple exit codes for timeouts (124 from subprocess, 137 from timeout command).
+    Handles multiple exit codes for timeouts:
+    - 124 = subprocess timeout
+    - 137 = timeout command signal (SIGKILL)
+    - 143 = SIGTERM (process killed, often by timeout)
     """
-    # Check for timeout (124 = subprocess timeout, 137 = timeout command signal)
-    if exit_code == 124 or exit_code == 137:
+    # Check for timeout (124 = subprocess timeout, 137 = SIGKILL, 143 = SIGTERM)
+    if exit_code == 124 or exit_code == 137 or exit_code == 143:
         return 'timeout'
     
     # Look for sat/unsat/unknown on their own lines (case-insensitive)
