@@ -44,7 +44,7 @@ jobs:
           workflow: cvc5-commit-fuzzer.yml
       
       - name: Check upstream for new commits
-        id: set-outputs
+        id: set-outputs-scheduled
         if: github.event_name == 'schedule'
         run: |
           echo "📥 Checking for upstream changes..."
@@ -56,13 +56,30 @@ jobs:
           echo "is_manual_run=false" >> $GITHUB_OUTPUT
       
       - name: Set manual run outputs
-        id: set-outputs
+        id: set-outputs-manual
         if: github.event_name == 'workflow_dispatch'
         run: |
           echo "🔨 Manual run triggered"
           echo "fuzzing_needed=true" >> $GITHUB_OUTPUT
           echo "sha=${{ inputs.cvc5_commit_hash }}" >> $GITHUB_OUTPUT
           echo "is_manual_run=true" >> $GITHUB_OUTPUT
+      
+      - name: Set combined outputs
+        id: set-outputs
+        run: |
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            FUZZING_NEEDED="${{ steps.set-outputs-scheduled.outputs.fuzzing_needed }}"
+            SHA="${{ steps.set-outputs-scheduled.outputs.sha }}"
+            echo "fuzzing_needed=${FUZZING_NEEDED:-false}" >> $GITHUB_OUTPUT
+            echo "sha=${SHA:-}" >> $GITHUB_OUTPUT
+            echo "is_manual_run=false" >> $GITHUB_OUTPUT
+          else
+            FUZZING_NEEDED="${{ steps.set-outputs-manual.outputs.fuzzing_needed }}"
+            SHA="${{ steps.set-outputs-manual.outputs.sha }}"
+            echo "fuzzing_needed=${FUZZING_NEEDED:-true}" >> $GITHUB_OUTPUT
+            echo "sha=${SHA:-}" >> $GITHUB_OUTPUT
+            echo "is_manual_run=true" >> $GITHUB_OUTPUT
+          fi
       
       - name: Configure AWS credentials
         if: github.event_name == 'schedule' && steps.set-outputs.outputs.fuzzing_needed == 'true'
@@ -73,7 +90,7 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
       
       - name: Check if production binary is available in S3
-        id: check-binary
+        id: check-binary-scheduled
         if: github.event_name == 'schedule' && steps.set-outputs.outputs.fuzzing_needed == 'true'
         run: |
           SHA="${{ steps.set-outputs.outputs.sha }}"
@@ -90,10 +107,21 @@ jobs:
           fi
       
       - name: Set binary available for manual runs
-        id: check-binary
+        id: check-binary-manual
         if: github.event_name == 'workflow_dispatch'
         run: |
           echo "binary_available=true" >> $GITHUB_OUTPUT
+      
+      - name: Set combined binary availability
+        id: check-binary
+        run: |
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            BINARY_AVAILABLE="${{ steps.check-binary-scheduled.outputs.binary_available }}"
+            echo "binary_available=${BINARY_AVAILABLE:-false}" >> $GITHUB_OUTPUT
+          else
+            BINARY_AVAILABLE="${{ steps.check-binary-manual.outputs.binary_available }}"
+            echo "binary_available=${BINARY_AVAILABLE:-true}" >> $GITHUB_OUTPUT
+          fi
       
       - name: Upload last fuzzed SHA artifact (keep fresh when no fuzzing needed)
         if: github.event_name == 'schedule' && steps.set-outputs.outputs.fuzzing_needed == 'false'
