@@ -200,9 +200,14 @@ class CoverageMapper:
         # Skip tests that fail (exit code != 0 means solvers disagree or error)
         if result.returncode != 0:
             print(f"⚠️ {test_name} - oracle exit code {result.returncode} - {execution_time}s (skipping)")
-            # Print oracle output for debugging (verbose mode shows solver results)
+            # Print all oracle output for debugging (verbose mode shows solver results)
             if result.stdout:
                 oracle_lines = result.stdout.strip().split('\n')
+                for line in oracle_lines:
+                    if line.strip():
+                        print(f"   {line}")
+            if result.stderr:
+                oracle_lines = result.stderr.strip().split('\n')
                 for line in oracle_lines:
                     if line.strip():
                         print(f"   {line}")
