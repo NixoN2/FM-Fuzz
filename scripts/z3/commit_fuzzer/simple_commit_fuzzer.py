@@ -43,7 +43,8 @@ class SimpleCommitFuzzer:
         stop_buffer_minutes: int = 5,
         z3_old_path: Optional[str] = None,
         cvc4_path: Optional[str] = None,
-        cvc5_path: str = "./build/bin/cvc5",
+        z3_path: str = "./build/z3",
+        cvc5_path: Optional[str] = None,
         job_id: Optional[str] = None,
     ):
         self.tests = tests
@@ -77,10 +78,10 @@ class SimpleCommitFuzzer:
             self.time_remaining = None
             print("[DEBUG] No timeout set (running indefinitely)")
         
-        self.z3_new = "z3 model_validate=true"
+        self.z3_path = Path(z3_path)
         # self.z3_old_path = Path(z3_old_path) if z3_old_path else None
         # self.cvc4_path = Path(cvc4_path) if cvc4_path else None
-        self.cvc5_path = Path(cvc5_path)
+        self.cvc5_path = Path(cvc5_path) if cvc5_path else None
         
         self._validate_solvers()
         self.bugs_folder.mkdir(parents=True, exist_ok=True)
@@ -107,14 +108,13 @@ class SimpleCommitFuzzer:
         })
     
     def _validate_solvers(self):
-        z3_binary = self.z3_new.split()[0]  # Extract just "z3" from "z3 model_validate=true"
-        if not shutil.which(z3_binary):
-            raise ValueError(f"z3 not found in PATH")
+        if not self.z3_path.exists():
+            raise ValueError(f"z3 not found at: {self.z3_path}")
         # if self.z3_old_path and not self.z3_old_path.exists():
         #     raise ValueError(f"z3-old not found at: {self.z3_old_path}")
         # if self.cvc4_path and not self.cvc4_path.exists():
         #     raise ValueError(f"cvc4 not found at: {self.cvc4_path}")
-        if not self.cvc5_path.exists():
+        if self.cvc5_path and not self.cvc5_path.exists():
             raise ValueError(f"cvc5 not found at: {self.cvc5_path}")
     
     def _monitor_resources(self):
@@ -231,10 +231,11 @@ class SimpleCommitFuzzer:
             return self.resource_state.get('paused', False)
     
     def _get_solver_clis(self) -> str:
-        solvers = [self.z3_new]
+        solvers = [f"{self.z3_path} model_validate=true"]
         # if self.z3_old_path:
         #     solvers.append(str(self.z3_old_path))
-        solvers.append(f"{self.cvc5_path} --check-models --check-proofs --strings-exp")
+        if self.cvc5_path:
+            solvers.append(f"{self.cvc5_path} --check-models --check-proofs --strings-exp")
         # if self.cvc4_path:
         #     solvers.append(str(self.cvc4_path))
         return ";".join(solvers)
@@ -582,9 +583,13 @@ def main():
         help="Path to cvc4-1.6 binary (not used, commented out)",
     )
     parser.add_argument(
+        "--z3-path",
+        default="./build/z3",
+        help="Path to z3 binary (default: ./build/z3)",
+    )
+    parser.add_argument(
         "--cvc5-path",
-        default="./build/bin/cvc5",
-        help="Path to cvc5 binary (default: ./build/bin/cvc5)",
+        help="Path to cvc5 binary (for oracle, optional)",
     )
     try:
         default_workers = psutil.cpu_count()
@@ -630,6 +635,7 @@ def main():
             stop_buffer_minutes=args.stop_buffer_minutes,
             z3_old_path=args.z3_old_path,
             cvc4_path=args.cvc4_path,
+            z3_path=args.z3_path,
             cvc5_path=args.cvc5_path,
             job_id=args.job_id,
         )

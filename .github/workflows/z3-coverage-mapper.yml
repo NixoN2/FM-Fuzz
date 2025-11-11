@@ -17,15 +17,27 @@ jobs:
         include:
           - job_name: z3-part1
             start_index: 1
-            end_index: 283
+            end_index: 142
           - job_name: z3-part2
-            start_index: 284
-            end_index: 566
+            start_index: 143
+            end_index: 284
           - job_name: z3-part3
-            start_index: 567
-            end_index: 849
+            start_index: 285
+            end_index: 426
           - job_name: z3-part4
-            start_index: 850
+            start_index: 427
+            end_index: 568
+          - job_name: z3-part5
+            start_index: 569
+            end_index: 710
+          - job_name: z3-part6
+            start_index: 711
+            end_index: 851
+          - job_name: z3-part7
+            start_index: 852
+            end_index: 992
+          - job_name: z3-part8
+            start_index: 993
             end_index: 1133
     
     steps:
@@ -54,6 +66,13 @@ jobs:
           else
             git clone https://github.com/z3prover/z3test.git z3test
           fi
+      
+      - name: Install CVC5 oracle
+        run: |
+          pip install requests
+          python3 scripts/download_cvc5.py $HOME/.local/bin
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          cvc5 --version
       
       - name: Build Z3 with coverage
         run: |

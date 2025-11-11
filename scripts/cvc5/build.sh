@@ -52,7 +52,7 @@ if [[ "$ENABLE_COVERAGE" == "true" ]]; then
     # Set environment variables for coverage collection
     export GCOV_PREFIX=$(pwd)/cvc5/build
     export GCOV_PREFIX_STRIP=0
-    export TEST_TIMEOUT=10800
+    export TEST_TIMEOUT=120
     echo "🔧 Set coverage environment variables:"
     echo "  GCOV_PREFIX=$GCOV_PREFIX"
     echo "  GCOV_PREFIX_STRIP=$GCOV_PREFIX_STRIP"
