@@ -15,8 +15,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - job_name: z3-part1
+          - job_name: z3-part1a
             start_index: 1
+            end_index: 67
+          - job_name: z3-part1b
+            start_index: 68
+            end_index: 134
+          - job_name: z3-part1c
+            start_index: 135
+            end_index: 201
+          - job_name: z3-part1d
+            start_index: 202
             end_index: 269
           - job_name: z3-part2
             start_index: 270
@@ -24,8 +33,23 @@ jobs:
           - job_name: z3-part3
             start_index: 539
             end_index: 807
-          - job_name: z3-part4
+          - job_name: z3-part4a
             start_index: 808
+            end_index: 852
+          - job_name: z3-part4b
+            start_index: 853
+            end_index: 897
+          - job_name: z3-part4c
+            start_index: 898
+            end_index: 942
+          - job_name: z3-part4d
+            start_index: 943
+            end_index: 987
+          - job_name: z3-part4e
+            start_index: 988
+            end_index: 1032
+          - job_name: z3-part4f
+            start_index: 1033
             end_index: 1077
     
     steps:
