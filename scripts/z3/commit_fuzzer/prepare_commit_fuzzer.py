@@ -641,36 +641,71 @@ class PrepareCommitAnalyzer:
             funcs: List[FunctionInfo] = []
             all_funcs_count = 0
             z3_funcs_count = 0
+            unknown_kinds_count = 0
 
             def visit(n):
-                nonlocal all_funcs_count, z3_funcs_count
-                if n.kind in [clang.cindex.CursorKind.FUNCTION_DECL, clang.cindex.CursorKind.CXX_METHOD] and n.is_definition():
-                    all_funcs_count += 1
-                    sig = self.get_function_signature(n)
-                    node_file = str(n.location.file) if n.location and n.location.file else None
-                    if sig:
-                        is_z3 = self.is_z3_function(sig)
-                        if is_z3:
-                            z3_funcs_count += 1
-                        if sig and node_file and is_z3:
-                            nf = normpath(node_file)
-                            exp = normpath(abs_path)
-                            if nf.endswith(exp):
-                                funcs.append(FunctionInfo(
-                                    signature=sig,
-                                    start=n.extent.start.line,
-                                    end=n.extent.end.line,
-                                    file=node_file
-                                ))
-                            else:
-                                print(f"DEBUG parse_functions: File mismatch - nf={nf}, exp={exp}")
-                        elif sig and not is_z3:
-                            if all_funcs_count <= 5:  # Show first few non-Z3 functions
-                                print(f"DEBUG parse_functions: Non-Z3 function: {sig[:80]}")
-                for c in n.get_children():
-                    visit(c)
+                nonlocal all_funcs_count, z3_funcs_count, unknown_kinds_count
+                try:
+                    # Handle unknown cursor kinds gracefully (version mismatch between libclang and bindings)
+                    try:
+                        cursor_kind = n.kind
+                    except ValueError as e:
+                        # Unknown cursor kind - skip this node but continue visiting children
+                        if "Unknown" in str(e) and unknown_kinds_count < 5:
+                            print(f"DEBUG parse_functions: Skipping unknown cursor kind: {e}")
+                        unknown_kinds_count += 1
+                        # Still visit children in case they're valid
+                        try:
+                            for c in n.get_children():
+                                visit(c)
+                        except Exception:
+                            pass
+                        return
+                    
+                    if cursor_kind in [clang.cindex.CursorKind.FUNCTION_DECL, clang.cindex.CursorKind.CXX_METHOD]:
+                        try:
+                            is_def = n.is_definition()
+                        except Exception:
+                            is_def = False
+                        
+                        if is_def:
+                            all_funcs_count += 1
+                            sig = self.get_function_signature(n)
+                            node_file = str(n.location.file) if n.location and n.location.file else None
+                            if sig:
+                                is_z3 = self.is_z3_function(sig)
+                                if is_z3:
+                                    z3_funcs_count += 1
+                                if sig and node_file and is_z3:
+                                    nf = normpath(node_file)
+                                    exp = normpath(abs_path)
+                                    if nf.endswith(exp):
+                                        funcs.append(FunctionInfo(
+                                            signature=sig,
+                                            start=n.extent.start.line,
+                                            end=n.extent.end.line,
+                                            file=node_file
+                                        ))
+                                    else:
+                                        print(f"DEBUG parse_functions: File mismatch - nf={nf}, exp={exp}")
+                                elif sig and not is_z3:
+                                    if all_funcs_count <= 5:  # Show first few non-Z3 functions
+                                        print(f"DEBUG parse_functions: Non-Z3 function: {sig[:80]}")
+                except Exception as e:
+                    # Handle any other errors during node processing
+                    if all_funcs_count < 5:  # Only print first few errors to avoid spam
+                        print(f"DEBUG parse_functions: Error processing node: {type(e).__name__}: {e}")
+                
+                # Visit children (even if this node had errors)
+                try:
+                    for c in n.get_children():
+                        visit(c)
+                except Exception:
+                    pass  # Skip children if we can't iterate
 
             visit(tu.cursor)
+            if unknown_kinds_count > 0:
+                print(f"DEBUG parse_functions: Encountered {unknown_kinds_count} unknown cursor kinds (skipped)")
             print(f"DEBUG parse_functions: Found {all_funcs_count} total functions, {z3_funcs_count} Z3 functions, {len(funcs)} matching file")
             return funcs
         except Exception as e:
