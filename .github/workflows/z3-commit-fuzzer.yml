@@ -585,7 +585,7 @@ jobs:
           ${{ github.workspace }}/scripts/z3/commit_fuzzer/simple_commit_fuzzer.py \
             --tests-json '${{ toJson(matrix.tests) }}' \
             --job-id '${{ matrix.job_id }}' \
-            --tests-root '../z3test/regressions' \
+            --tests-root '../z3test' \
             --job-start-time "$JOB_START" \
             --stop-buffer-minutes ${STOP_BUFFER} \
             --iterations 2147483647 \
