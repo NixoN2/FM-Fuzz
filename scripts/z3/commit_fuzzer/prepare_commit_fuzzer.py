@@ -202,13 +202,6 @@ class Matcher:
                 matching_tests.update(tests)
                 path_removed_matches += 1
                 match_type = "path_removed"
-                # Debug: show example mapping keys for this signature
-                try:
-                    examples = cov_sig_to_fulls.get(our_sig_norm, [])
-                    if examples:
-                        print(f"DEBUG_PATHLESS our={our_sig_norm} examples={examples}")
-                except Exception:
-                    pass
             else:
                 try:
                     best = max(
@@ -220,12 +213,8 @@ class Matcher:
                     if best_sig is not None and best_ratio >= 0.9:
                         # Do NOT count fuzzy matches as coverage; only report candidates
                         match_type = f"fuzzy_candidate:{best_ratio:.2f}"
-                        try:
-                            examples = cov_sig_to_fulls.get(best_sig, [])
-                            if examples:
-                                print(f"DEBUG_FUZZY_MAP our={our_sig_norm} matched_sig={best_sig} examples={examples}")
-                        except Exception:
-                            pass
+                        # Fuzzy match found but not used (new function, no direct coverage)
+                        pass
                 except Exception:
                     pass
 
@@ -497,8 +486,7 @@ class PrepareCommitAnalyzer:
             # (e.g., if signature is just "mk_mul_div" but it's in a class context)
             # But we'll be conservative and require namespace for now
             return False
-        except Exception as e:
-            print(f"DEBUG is_z3_function error for '{signature[:60]}': {e}")
+        except Exception:
             return False
     
     def get_commit_functions(self, commit_hash: str) -> List[str]:
@@ -508,54 +496,34 @@ class PrepareCommitAnalyzer:
         """
         commit_info = self.git.get_commit_info(commit_hash)
         if not commit_info:
-            print("DEBUG: No commit info found")
             return []
 
         # Get diff and changed line ranges on the new side
         diff_text = self.git.get_commit_diff(commit_hash)
         changed_files_lines = self.git.get_changed_lines(diff_text)
-        print(f"DEBUG: Changed files: {list(changed_files_lines.keys())}")
-        for file_path, lines in changed_files_lines.items():
-            print(f"DEBUG:   {file_path}: {len(lines)} changed lines (first 10: {sorted(lines)[:10]})")
 
         # Parent commit (if any)
         try:
             commit = self.repo.commit(commit_hash)
             parent_hash = commit.parents[0].hexsha if commit.parents else None
-            print(f"DEBUG: Parent commit: {parent_hash}")
-        except Exception as e:
+        except Exception:
             parent_hash = None
-            print(f"DEBUG: No parent commit: {e}")
 
         changed_functions: List[str] = []
 
         for file_path, changed_lines in changed_files_lines.items():
             # Only consider project sources under src/
             if not (file_path.startswith('src/') and file_path.endswith(('.cpp', '.cc', '.c', '.h', '.hpp'))):
-                print(f"DEBUG: Skipping {file_path} (not in src/ or not C++ file)")
                 continue
 
-            print(f"DEBUG: Processing {file_path} with {len(changed_lines)} changed lines")
             after_src = self.git.get_file_text_at_commit(commit_hash, file_path)
             if after_src is None:
-                print(f"DEBUG: Could not get file text for {file_path} at commit {commit_hash}")
                 continue
             before_src = self.git.get_file_text_at_commit(parent_hash, file_path) if parent_hash else None
 
             # Parse functions from in-memory contents
-            print(f"DEBUG: Parsing functions from {file_path}...")
             after_funcs = self.parse_functions_from_text(file_path, after_src)
             before_funcs = self.parse_functions_from_text(file_path, before_src) if before_src is not None else []
-            print(f"DEBUG: Found {len(after_funcs)} functions in after, {len(before_funcs)} in before")
-            
-            # Debug: print all function signatures found
-            if after_funcs:
-                print(f"DEBUG: All functions found in {file_path}:")
-                for f in after_funcs[:20]:  # Print first 20
-                    is_z3 = self.is_z3_function(f.signature)
-                    print(f"DEBUG:   {f.signature[:80]}... (is_z3={is_z3}, lines={f.start}-{f.end})")
-                if len(after_funcs) > 20:
-                    print(f"DEBUG:   ... and {len(after_funcs) - 20} more")
 
             # Build indexes for before
             before_by_sig = {self.build_signature_key(f.signature): f for f in before_funcs}
@@ -572,23 +540,14 @@ class PrepareCommitAnalyzer:
             selected: Dict[str, FunctionInfo] = {}
             if after_funcs:
                 z3_funcs = [f for f in after_funcs if self.is_z3_function(f.signature)]
-                print(f"DEBUG: Filtered to {len(z3_funcs)} Z3 functions")
                 for ln in sorted(changed_lines):
                     candidates = [f for f in z3_funcs if int(f.start) <= ln <= int(f.end)]
                     if not candidates:
-                        print(f"DEBUG: Line {ln}: No Z3 function candidates found")
-                        # Debug: show what functions are near this line
-                        nearby = [f for f in after_funcs if abs(int(f.start) - ln) <= 5 or abs(int(f.end) - ln) <= 5]
-                        if nearby:
-                            print(f"DEBUG:   Nearby functions (not Z3): {[f.signature[:60] for f in nearby[:3]]}")
                         continue
                     # choose innermost by minimal extent length, then earliest start
                     chosen = min(candidates, key=lambda f: (int(f.end) - int(f.start), int(f.start)))
                     key = self.build_signature_key(chosen.signature)
                     selected[key] = chosen
-                    print(f"DEBUG: Line {ln}: Selected {chosen.signature[:80]} (lines {chosen.start}-{chosen.end})")
-
-            print(f"DEBUG: Selected {len(selected)} unique functions from changed lines")
 
             # Emit selected functions, dropping pure moves
             for sig_key, f in selected.items():
@@ -598,14 +557,12 @@ class PrepareCommitAnalyzer:
                     bf = before_by_sig[sig_key]
                     if normalized_body(before_src, bf) == normalized_body(after_src, f):
                         is_move = True
-                        print(f"DEBUG: Excluding {f.signature[:60]} as pure move")
                 if is_move:
                     continue
                 mapping_entry = f"{file_path}:{f.signature}"
                 changed_functions.append(mapping_entry)
                 print(f"    Selected: {mapping_entry} (overlap=True, sig_changed=False)")
 
-        print(f"DEBUG: Total changed functions found: {len(changed_functions)}")
         return changed_functions
 
     def parse_functions_from_text(self, file_path: str, source_text: Optional[str]) -> List[FunctionInfo]:
@@ -617,33 +574,66 @@ class PrepareCommitAnalyzer:
             index = clang.cindex.Index.create()
             args = self._get_clang_args_for_file(file_path)
             abs_path = str((self.repo_path / file_path).resolve()) if not os.path.isabs(file_path) else file_path
+            
             tu = index.parse(abs_path, args=args, unsaved_files=[(abs_path, source_text)])
-            try:
-                if tu.diagnostics:
-                    print(f"DEBUG_CLANG_TU_DIAG_COUNT: {len(tu.diagnostics)}")
-                    for diag in tu.diagnostics:
-                        print(f"DEBUG_CLANG_TU_DIAG: {diag.severity}: {diag.spelling}")
-            except Exception:
-                pass
 
             funcs: List[FunctionInfo] = []
+            all_funcs_count = 0
+            z3_funcs_count = 0
+            unknown_kinds_count = 0
 
             def visit(n):
-                if n.kind in [clang.cindex.CursorKind.FUNCTION_DECL, clang.cindex.CursorKind.CXX_METHOD] and n.is_definition():
-                    sig = self.get_function_signature(n)
-                    node_file = str(n.location.file) if n.location and n.location.file else None
-                    if sig and node_file and self.is_z3_function(sig):
-                        nf = normpath(node_file)
-                        exp = normpath(abs_path)
-                        if nf.endswith(exp):
-                            funcs.append(FunctionInfo(
-                                signature=sig,
-                                start=n.extent.start.line,
-                                end=n.extent.end.line,
-                                file=node_file
-                            ))
-                for c in n.get_children():
-                    visit(c)
+                nonlocal all_funcs_count, z3_funcs_count, unknown_kinds_count
+                try:
+                    # Handle unknown cursor kinds gracefully (version mismatch between libclang and bindings)
+                    try:
+                        cursor_kind = n.kind
+                    except ValueError as e:
+                        # Unknown cursor kind - skip this node but continue visiting children
+                        # This is a known issue with libclang version mismatches, but we handle it gracefully
+                        unknown_kinds_count += 1
+                        # Still visit children in case they're valid
+                        try:
+                            for c in n.get_children():
+                                visit(c)
+                        except Exception:
+                            pass
+                        return
+                    
+                    if cursor_kind in [clang.cindex.CursorKind.FUNCTION_DECL, clang.cindex.CursorKind.CXX_METHOD]:
+                        try:
+                            is_def = n.is_definition()
+                        except Exception:
+                            is_def = False
+                        
+                        if is_def:
+                            all_funcs_count += 1
+                            sig = self.get_function_signature(n)
+                            node_file = str(n.location.file) if n.location and n.location.file else None
+                            if sig:
+                                is_z3 = self.is_z3_function(sig)
+                                if is_z3:
+                                    z3_funcs_count += 1
+                                if sig and node_file and is_z3:
+                                    nf = normpath(node_file)
+                                    exp = normpath(abs_path)
+                                    if nf.endswith(exp):
+                                        funcs.append(FunctionInfo(
+                                            signature=sig,
+                                            start=n.extent.start.line,
+                                            end=n.extent.end.line,
+                                            file=node_file
+                                        ))
+                except Exception:
+                    # Handle any other errors during node processing silently
+                    pass
+                
+                # Visit children (even if this node had errors)
+                try:
+                    for c in n.get_children():
+                        visit(c)
+                except Exception:
+                    pass  # Skip children if we can't iterate
 
             visit(tu.cursor)
             return funcs
@@ -826,16 +816,14 @@ class PrepareCommitAnalyzer:
 
 
     def _build_clang_args(self) -> List[str]:
-        """Build unified clang arguments for Z3 parsing."""
+        """Build unified clang arguments for Z3 parsing.
+        Note: We're parsing for AST analysis, not building, so we don't need coverage/debug flags.
+        """
         args = [
             # Force C++ mode for header files
             '-x', 'c++',
-            # Optimization and debug flags (important for coverage)
-            '-O0',                              # No optimization
-            '-g',                               # Debug symbols
-            '--coverage',                       # Coverage instrumentation
-            # C++ standard
-            '-std=gnu++20',                     # C++20 standard (Z3 uses C++20)
+            # C++ standard (Z3 uses C++20, but try c++20 first, fallback to gnu++20 if needed)
+            '-std=c++20',                       # C++20 standard (Z3 uses C++20)
             '-gz=none',                         # Disable debug section compression
             # Include paths (critical for Z3)
             '-I./include',                      # Public headers
@@ -843,29 +831,20 @@ class PrepareCommitAnalyzer:
             '-I./src',                          # Source directory
             '-I./build/src',                    # Build source directory
             
-            # Z3-specific preprocessor definitions
+            # Z3-specific preprocessor definitions (minimal set for parsing)
             '-DZ3DEBUG',                        # Z3 debug mode
             '-D_MP_INTERNAL',                    # Internal multiprecision
-            '-D_TRACE',                         # Enable tracing
             '-D_USE_MATH_DEFINES',
             
-            # Compiler flags used by Z3
+            # Compiler flags for parsing (avoid errors that would stop parsing)
             '-fPIC',                            # Position Independent Code
-            '-fvisibility=hidden',              # Hide symbols
-            '-fvisibility-inlines-hidden',      # Hide inline symbols
-            '-Wall',                            # All warnings
-            '-Werror=odr',                      # ODR violations as errors
-            '-Werror=return-type',              # Missing returns as errors
-            '-Werror=delete-non-virtual-dtor', # Delete non-virtual dtor as errors
-            '-Werror=overloaded-virtual',       # Overloaded virtual as errors
-            '-Werror=non-virtual-dtor',         # Non-virtual dtor as errors
-            '-Werror=null-dereference',        # Null dereference as errors
+            '-Wall',                            # All warnings (but don't error)
+            '-Wno-error',                       # Don't treat warnings as errors
             '-Wsuggest-override',
             '-Wimplicit-fallthrough',
             '-Wshadow',
             '-fno-operator-names',
             '-Wno-deprecated-declarations',
-            '-Wno-error=deprecated-declarations',
             
             # Additional flags for better parsing
             '-fparse-all-comments',

@@ -2,8 +2,8 @@ name: Build Q3B
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 * * * *'  # Run every hour
+  # schedule:
+  #   - cron: '0 * * * *'  # Run every hour
 
 jobs:
   check-and-build:
