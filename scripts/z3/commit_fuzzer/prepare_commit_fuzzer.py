@@ -192,51 +192,18 @@ class Matcher:
             our_sig_norm = self._strip_line_suffix(our_sig)
             our_full_norm = f"{our_path}:{our_sig_norm}"
 
-            print(f"DEBUG_MATCH: Function={func}")
-            print(f"DEBUG_MATCH:   our_path={our_path}")
-            print(f"DEBUG_MATCH:   our_sig={our_sig}")
-            print(f"DEBUG_MATCH:   our_sig_norm={our_sig_norm}")
-            print(f"DEBUG_MATCH:   our_full_norm={our_full_norm}")
-
             if our_full_norm in cov_full_to_tests:
                 tests = cov_full_to_tests[our_full_norm]
                 matching_tests.update(tests)
                 direct_matches += 1
                 match_type = "direct"
-                print(f"DEBUG_MATCH:   ✓ DIRECT MATCH (full path+signature)")
             elif our_sig_norm in cov_sig_to_tests:
                 tests = cov_sig_to_tests[our_sig_norm]
                 matching_tests.update(tests)
                 path_removed_matches += 1
                 match_type = "path_removed"
-                print(f"DEBUG_MATCH:   ✓ PATH-REMOVED MATCH (signature only)")
-                # Debug: show example mapping keys for this signature
-                try:
-                    examples = cov_sig_to_fulls.get(our_sig_norm, [])
-                    if examples:
-                        print(f"DEBUG_PATHLESS our={our_sig_norm} examples={examples[:3]}")
-                except Exception:
-                    pass
             else:
-                print(f"DEBUG_MATCH:   ✗ NO DIRECT MATCH")
-                # Show a few similar signatures for debugging
                 try:
-                    # Find best matches
-                    candidates = []
-                    for cov_sig in cov_sigs_list:
-                        ratio = difflib.SequenceMatcher(None, our_sig_norm, cov_sig).ratio()
-                        if ratio >= 0.8:  # Show anything >= 80% similar
-                            candidates.append((cov_sig, ratio))
-                    candidates.sort(key=lambda x: x[1], reverse=True)
-                    
-                    if candidates:
-                        print(f"DEBUG_MATCH:   Similar signatures (top 5):")
-                        for cov_sig, ratio in candidates[:5]:
-                            examples = cov_sig_to_fulls.get(cov_sig, [])
-                            print(f"DEBUG_MATCH:     ratio={ratio:.3f}: {cov_sig[:100]}")
-                            if examples:
-                                print(f"DEBUG_MATCH:       examples: {examples[:2]}")
-                    
                     best = max(
                         ((cov_sig, difflib.SequenceMatcher(None, our_sig_norm, cov_sig).ratio()) for cov_sig in cov_sigs_list),
                         key=lambda x: x[1],
@@ -246,26 +213,14 @@ class Matcher:
                     if best_sig is not None and best_ratio >= 0.9:
                         # Do NOT count fuzzy matches as coverage; only report candidates
                         match_type = f"fuzzy_candidate:{best_ratio:.2f}"
-                        print(f"DEBUG_MATCH:   Best fuzzy match: ratio={best_ratio:.3f}")
-                        print(f"DEBUG_MATCH:     our:  {our_sig_norm}")
-                        print(f"DEBUG_MATCH:     cov:  {best_sig}")
-                        # Character-by-character diff
-                        diff = list(difflib.unified_diff(
-                            our_sig_norm.split(), 
-                            best_sig.split(), 
-                            lineterm='', 
-                            n=0
-                        ))
-                        if diff:
-                            print(f"DEBUG_MATCH:     diff: {diff[:10]}")
                         try:
                             examples = cov_sig_to_fulls.get(best_sig, [])
                             if examples:
                                 print(f"DEBUG_FUZZY_MAP our={our_sig_norm} matched_sig={best_sig} examples={examples[:2]}")
                         except Exception:
                             pass
-                except Exception as e:
-                    print(f"DEBUG_MATCH:   Error finding matches: {e}")
+                except Exception:
+                    pass
 
             if matching_tests:
                 all_covering_tests.update(matching_tests)
@@ -535,8 +490,7 @@ class PrepareCommitAnalyzer:
             # (e.g., if signature is just "mk_mul_div" but it's in a class context)
             # But we'll be conservative and require namespace for now
             return False
-        except Exception as e:
-            print(f"DEBUG is_z3_function error for '{signature[:60]}': {e}")
+        except Exception:
             return False
     
     def get_commit_functions(self, commit_hash: str) -> List[str]:
@@ -546,54 +500,34 @@ class PrepareCommitAnalyzer:
         """
         commit_info = self.git.get_commit_info(commit_hash)
         if not commit_info:
-            print("DEBUG: No commit info found")
             return []
 
         # Get diff and changed line ranges on the new side
         diff_text = self.git.get_commit_diff(commit_hash)
         changed_files_lines = self.git.get_changed_lines(diff_text)
-        print(f"DEBUG: Changed files: {list(changed_files_lines.keys())}")
-        for file_path, lines in changed_files_lines.items():
-            print(f"DEBUG:   {file_path}: {len(lines)} changed lines (first 10: {sorted(lines)[:10]})")
 
         # Parent commit (if any)
         try:
             commit = self.repo.commit(commit_hash)
             parent_hash = commit.parents[0].hexsha if commit.parents else None
-            print(f"DEBUG: Parent commit: {parent_hash}")
-        except Exception as e:
+        except Exception:
             parent_hash = None
-            print(f"DEBUG: No parent commit: {e}")
 
         changed_functions: List[str] = []
 
         for file_path, changed_lines in changed_files_lines.items():
             # Only consider project sources under src/
             if not (file_path.startswith('src/') and file_path.endswith(('.cpp', '.cc', '.c', '.h', '.hpp'))):
-                print(f"DEBUG: Skipping {file_path} (not in src/ or not C++ file)")
                 continue
 
-            print(f"DEBUG: Processing {file_path} with {len(changed_lines)} changed lines")
             after_src = self.git.get_file_text_at_commit(commit_hash, file_path)
             if after_src is None:
-                print(f"DEBUG: Could not get file text for {file_path} at commit {commit_hash}")
                 continue
             before_src = self.git.get_file_text_at_commit(parent_hash, file_path) if parent_hash else None
 
             # Parse functions from in-memory contents
-            print(f"DEBUG: Parsing functions from {file_path}...")
             after_funcs = self.parse_functions_from_text(file_path, after_src)
             before_funcs = self.parse_functions_from_text(file_path, before_src) if before_src is not None else []
-            print(f"DEBUG: Found {len(after_funcs)} functions in after, {len(before_funcs)} in before")
-            
-            # Debug: print all function signatures found
-            if after_funcs:
-                print(f"DEBUG: All functions found in {file_path}:")
-                for f in after_funcs[:20]:  # Print first 20
-                    is_z3 = self.is_z3_function(f.signature)
-                    print(f"DEBUG:   {f.signature[:80]}... (is_z3={is_z3}, lines={f.start}-{f.end})")
-                if len(after_funcs) > 20:
-                    print(f"DEBUG:   ... and {len(after_funcs) - 20} more")
 
             # Build indexes for before
             before_by_sig = {self.build_signature_key(f.signature): f for f in before_funcs}
@@ -610,23 +544,14 @@ class PrepareCommitAnalyzer:
             selected: Dict[str, FunctionInfo] = {}
             if after_funcs:
                 z3_funcs = [f for f in after_funcs if self.is_z3_function(f.signature)]
-                print(f"DEBUG: Filtered to {len(z3_funcs)} Z3 functions")
                 for ln in sorted(changed_lines):
                     candidates = [f for f in z3_funcs if int(f.start) <= ln <= int(f.end)]
                     if not candidates:
-                        print(f"DEBUG: Line {ln}: No Z3 function candidates found")
-                        # Debug: show what functions are near this line
-                        nearby = [f for f in after_funcs if abs(int(f.start) - ln) <= 5 or abs(int(f.end) - ln) <= 5]
-                        if nearby:
-                            print(f"DEBUG:   Nearby functions (not Z3): {[f.signature[:60] for f in nearby[:3]]}")
                         continue
                     # choose innermost by minimal extent length, then earliest start
                     chosen = min(candidates, key=lambda f: (int(f.end) - int(f.start), int(f.start)))
                     key = self.build_signature_key(chosen.signature)
                     selected[key] = chosen
-                    print(f"DEBUG: Line {ln}: Selected {chosen.signature[:80]} (lines {chosen.start}-{chosen.end})")
-
-            print(f"DEBUG: Selected {len(selected)} unique functions from changed lines")
 
             # Emit selected functions, dropping pure moves
             for sig_key, f in selected.items():
@@ -636,45 +561,25 @@ class PrepareCommitAnalyzer:
                     bf = before_by_sig[sig_key]
                     if normalized_body(before_src, bf) == normalized_body(after_src, f):
                         is_move = True
-                        print(f"DEBUG: Excluding {f.signature[:60]} as pure move")
                 if is_move:
                     continue
                 mapping_entry = f"{file_path}:{f.signature}"
                 changed_functions.append(mapping_entry)
                 print(f"    Selected: {mapping_entry} (overlap=True, sig_changed=False)")
 
-        print(f"DEBUG: Total changed functions found: {len(changed_functions)}")
         return changed_functions
 
     def parse_functions_from_text(self, file_path: str, source_text: Optional[str]) -> List[FunctionInfo]:
         """Parse C++ function definitions from provided source text using libclang unsaved_files."""
         if source_text is None:
-            print(f"DEBUG parse_functions: source_text is None for {file_path}")
             return []
         
         try:
-            print(f"DEBUG parse_functions: Starting parse for {file_path} (text length: {len(source_text)})")
             index = clang.cindex.Index.create()
             args = self._get_clang_args_for_file(file_path)
-            print(f"DEBUG parse_functions: Clang args (first 10): {args[:10]}")
             abs_path = str((self.repo_path / file_path).resolve()) if not os.path.isabs(file_path) else file_path
-            print(f"DEBUG parse_functions: Absolute path: {abs_path}")
-            print(f"DEBUG parse_functions: Compilation DB available: {self.compdb is not None}")
             
             tu = index.parse(abs_path, args=args, unsaved_files=[(abs_path, source_text)])
-            print(f"DEBUG parse_functions: Translation unit parsed successfully")
-            
-            try:
-                if tu.diagnostics:
-                    print(f"DEBUG_CLANG_TU_DIAG_COUNT: {len(tu.diagnostics)}")
-                    for i, diag in enumerate(tu.diagnostics):
-                        print(f"DEBUG_CLANG_TU_DIAG[{i}]: severity={diag.severity}, location={diag.location}, spelling={diag.spelling}")
-                else:
-                    print(f"DEBUG_CLANG_TU_DIAG: No diagnostics")
-            except Exception as e:
-                print(f"DEBUG parse_functions: Error getting diagnostics: {e}")
-                import traceback
-                print(f"DEBUG parse_functions: Diagnostics traceback: {traceback.format_exc()}")
 
             funcs: List[FunctionInfo] = []
             all_funcs_count = 0
@@ -723,10 +628,9 @@ class PrepareCommitAnalyzer:
                                             end=n.extent.end.line,
                                             file=node_file
                                         ))
-                except Exception as e:
-                    # Handle any other errors during node processing
-                    if all_funcs_count < 5:  # Only print first few errors to avoid spam
-                        print(f"DEBUG parse_functions: Error processing node: {type(e).__name__}: {e}")
+                except Exception:
+                    # Handle any other errors during node processing silently
+                    pass
                 
                 # Visit children (even if this node had errors)
                 try:
@@ -736,14 +640,8 @@ class PrepareCommitAnalyzer:
                     pass  # Skip children if we can't iterate
 
             visit(tu.cursor)
-            if unknown_kinds_count > 0:
-                print(f"DEBUG parse_functions: Encountered {unknown_kinds_count} unknown cursor kinds (skipped)")
-            print(f"DEBUG parse_functions: Found {all_funcs_count} total functions, {z3_funcs_count} Z3 functions, {len(funcs)} matching file")
             return funcs
-        except Exception as e:
-            import traceback
-            print(f"DEBUG parse_functions: Exception during parsing: {type(e).__name__}: {e}")
-            print(f"DEBUG parse_functions: Traceback: {traceback.format_exc()}")
+        except Exception:
             return []
 
     def build_signature_key(self, signature: str) -> str:

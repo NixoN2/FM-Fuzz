@@ -563,7 +563,7 @@ jobs:
           ${{ github.workspace }}/solvers/cvc4-1.6 --version
           ${{ github.workspace }}/solvers/z3-4.8.7 --version
           cvc5 --version
-          ./build/z3 --version
+          z3/build/z3 --version
 
       - name: Run Simple Fuzzer on assigned tests
         working-directory: z3
