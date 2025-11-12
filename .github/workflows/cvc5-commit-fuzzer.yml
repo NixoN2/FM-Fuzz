@@ -42,6 +42,8 @@ jobs:
           path: .cache
           github_token: ${{ secrets.GITHUB_TOKEN }}
           workflow: cvc5-commit-fuzzer.yml
+          check_artifacts: true
+          search_artifacts: true
       
       - name: Check upstream for new commits
         id: set-outputs-scheduled
