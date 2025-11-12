@@ -440,7 +440,7 @@ class SimpleCommitFuzzer:
         print(f"Iterations per test: {self.iterations}")
         print(f"CPU cores: {self.cpu_count}")
         print(f"Workers: {self.num_workers}")
-        print(f"Solvers: z3={self.z3_new}, cvc5={self.cvc5_path} --check-models --check-proofs --strings-exp")
+        print(f"Solvers: z3={self.z3_path}, cvc5={self.cvc5_path} --check-models --check-proofs --strings-exp")
         print()
         
         for test in self.tests:
