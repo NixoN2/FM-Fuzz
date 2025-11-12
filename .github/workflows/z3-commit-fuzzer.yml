@@ -17,7 +17,7 @@ on:
         type: number
         default: 5
   schedule:
-    - cron: '30 * * * *'  # Run at 30 minutes past every hour (0:30, 1:30, 2:30, etc.)
+    - cron: '30 0,6,12,18 * * *'  # Run every 6 hours at 6:30, 12:30, 18:30, 00:30
 
 jobs:
   check-upstream:
@@ -389,31 +389,32 @@ jobs:
             1
           
           if [ ! -f "fuzzer_matrix.json" ]; then
-            echo "No matrix file created, setting empty outputs"
+            echo "No matrix file created (no functions found or no tests), setting empty outputs"
             echo "matrix={\"include\":[]}" >> $GITHUB_OUTPUT
             echo "total_tests=0" >> $GITHUB_OUTPUT
             echo "total_jobs=0" >> $GITHUB_OUTPUT
-            echo "No matrix file created, ending job"
-            exit 0
+            echo "✅ No functions to fuzz - ending gracefully"
+          else
+            # Read matrix data and output to GitHub Actions
+            MATRIX=$(jq -c '.matrix' fuzzer_matrix.json)
+            TOTAL_TESTS=$(jq -r '.total_tests' fuzzer_matrix.json)
+            TOTAL_JOBS=$(jq -r '.total_jobs' fuzzer_matrix.json)
+            
+            echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+            echo "total_tests=$TOTAL_TESTS" >> $GITHUB_OUTPUT
+            echo "total_jobs=$TOTAL_JOBS" >> $GITHUB_OUTPUT
+            
+            echo "Matrix created with $TOTAL_JOBS jobs for $TOTAL_TESTS tests"
           fi
-          
-          # Read matrix data and output to GitHub Actions
-          MATRIX=$(jq -c '.matrix' fuzzer_matrix.json)
-          TOTAL_TESTS=$(jq -r '.total_tests' fuzzer_matrix.json)
-          TOTAL_JOBS=$(jq -r '.total_jobs' fuzzer_matrix.json)
-          
-          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-          echo "total_tests=$TOTAL_TESTS" >> $GITHUB_OUTPUT
-          echo "total_jobs=$TOTAL_JOBS" >> $GITHUB_OUTPUT
-          
-          echo "Matrix created with $TOTAL_JOBS jobs for $TOTAL_TESTS tests"
       
-      - name: Update last fuzzed SHA after successful fuzzing
+      - name: Update last fuzzed SHA (always record, even if no functions found)
         if: github.event_name == 'schedule'
         working-directory: z3
         run: |
           mkdir -p ../.cache
-          echo "$(git rev-parse HEAD)" > ../.cache/z3_last_fuzzed_sha
+          COMMIT_HASH=$(git rev-parse HEAD)
+          echo "$COMMIT_HASH" > ../.cache/z3_last_fuzzed_sha
+          echo "✅ Recorded last fuzzed SHA: $COMMIT_HASH (even if no functions were found)"
       
       - name: Upload last fuzzed SHA artifact
         if: github.event_name == 'schedule'
