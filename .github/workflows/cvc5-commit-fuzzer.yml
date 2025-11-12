@@ -595,9 +595,13 @@ jobs:
         run: |
           mkdir -p combined-bugs
           
-          # Copy all bugs from all job artifacts
+          # Copy all bugs from all job artifacts (if any exist)
           # Each artifact is in bugs-artifacts/bugs-job-{job_id}/bugs/
-          find bugs-artifacts -name "*.smt2" -type f -exec cp {} combined-bugs/ \;
+          if [ -d "bugs-artifacts" ]; then
+            find bugs-artifacts -name "*.smt2" -type f -exec cp {} combined-bugs/ \; 2>/dev/null || true
+          else
+            echo "No bug artifacts directory found (no bugs were found in any job)"
+          fi
           
           # Count bugs
           BUG_COUNT=$(find combined-bugs -name "*.smt2" -type f 2>/dev/null | wc -l || echo "0")
@@ -605,7 +609,7 @@ jobs:
           echo "bug_count=$BUG_COUNT" >> $GITHUB_OUTPUT
           
           if [ "$BUG_COUNT" -eq 0 ]; then
-            echo "No bugs found, skipping upload"
+            echo "✅ No bugs found, skipping upload"
             echo "bugs_found=false" >> $GITHUB_OUTPUT
           else
             echo "bugs_found=true" >> $GITHUB_OUTPUT
