@@ -866,6 +866,7 @@ class PrepareCommitAnalyzer:
                 'summary': {
                     'total_functions': 0,
                     'functions_with_tests': 0,
+                    'functions_without_tests': 0,
                     'total_covering_tests': 0,
                     'coverage_percentage': 0
                 }
