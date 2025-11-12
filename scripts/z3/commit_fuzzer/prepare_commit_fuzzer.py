@@ -611,43 +611,72 @@ class PrepareCommitAnalyzer:
     def parse_functions_from_text(self, file_path: str, source_text: Optional[str]) -> List[FunctionInfo]:
         """Parse C++ function definitions from provided source text using libclang unsaved_files."""
         if source_text is None:
+            print(f"DEBUG parse_functions: source_text is None for {file_path}")
             return []
         
         try:
+            print(f"DEBUG parse_functions: Starting parse for {file_path} (text length: {len(source_text)})")
             index = clang.cindex.Index.create()
             args = self._get_clang_args_for_file(file_path)
+            print(f"DEBUG parse_functions: Clang args (first 10): {args[:10]}")
             abs_path = str((self.repo_path / file_path).resolve()) if not os.path.isabs(file_path) else file_path
+            print(f"DEBUG parse_functions: Absolute path: {abs_path}")
+            print(f"DEBUG parse_functions: Compilation DB available: {self.compdb is not None}")
+            
             tu = index.parse(abs_path, args=args, unsaved_files=[(abs_path, source_text)])
+            print(f"DEBUG parse_functions: Translation unit parsed successfully")
+            
             try:
                 if tu.diagnostics:
                     print(f"DEBUG_CLANG_TU_DIAG_COUNT: {len(tu.diagnostics)}")
-                    for diag in tu.diagnostics:
-                        print(f"DEBUG_CLANG_TU_DIAG: {diag.severity}: {diag.spelling}")
-            except Exception:
-                pass
+                    for i, diag in enumerate(tu.diagnostics):
+                        print(f"DEBUG_CLANG_TU_DIAG[{i}]: severity={diag.severity}, location={diag.location}, spelling={diag.spelling}")
+                else:
+                    print(f"DEBUG_CLANG_TU_DIAG: No diagnostics")
+            except Exception as e:
+                print(f"DEBUG parse_functions: Error getting diagnostics: {e}")
+                import traceback
+                print(f"DEBUG parse_functions: Diagnostics traceback: {traceback.format_exc()}")
 
             funcs: List[FunctionInfo] = []
+            all_funcs_count = 0
+            z3_funcs_count = 0
 
             def visit(n):
+                nonlocal all_funcs_count, z3_funcs_count
                 if n.kind in [clang.cindex.CursorKind.FUNCTION_DECL, clang.cindex.CursorKind.CXX_METHOD] and n.is_definition():
+                    all_funcs_count += 1
                     sig = self.get_function_signature(n)
                     node_file = str(n.location.file) if n.location and n.location.file else None
-                    if sig and node_file and self.is_z3_function(sig):
-                        nf = normpath(node_file)
-                        exp = normpath(abs_path)
-                        if nf.endswith(exp):
-                            funcs.append(FunctionInfo(
-                                signature=sig,
-                                start=n.extent.start.line,
-                                end=n.extent.end.line,
-                                file=node_file
-                            ))
+                    if sig:
+                        is_z3 = self.is_z3_function(sig)
+                        if is_z3:
+                            z3_funcs_count += 1
+                        if sig and node_file and is_z3:
+                            nf = normpath(node_file)
+                            exp = normpath(abs_path)
+                            if nf.endswith(exp):
+                                funcs.append(FunctionInfo(
+                                    signature=sig,
+                                    start=n.extent.start.line,
+                                    end=n.extent.end.line,
+                                    file=node_file
+                                ))
+                            else:
+                                print(f"DEBUG parse_functions: File mismatch - nf={nf}, exp={exp}")
+                        elif sig and not is_z3:
+                            if all_funcs_count <= 5:  # Show first few non-Z3 functions
+                                print(f"DEBUG parse_functions: Non-Z3 function: {sig[:80]}")
                 for c in n.get_children():
                     visit(c)
 
             visit(tu.cursor)
+            print(f"DEBUG parse_functions: Found {all_funcs_count} total functions, {z3_funcs_count} Z3 functions, {len(funcs)} matching file")
             return funcs
-        except Exception:
+        except Exception as e:
+            import traceback
+            print(f"DEBUG parse_functions: Exception during parsing: {type(e).__name__}: {e}")
+            print(f"DEBUG parse_functions: Traceback: {traceback.format_exc()}")
             return []
 
     def build_signature_key(self, signature: str) -> str:
