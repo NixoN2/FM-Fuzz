@@ -213,12 +213,8 @@ class Matcher:
                     if best_sig is not None and best_ratio >= 0.9:
                         # Do NOT count fuzzy matches as coverage; only report candidates
                         match_type = f"fuzzy_candidate:{best_ratio:.2f}"
-                        try:
-                            examples = cov_sig_to_fulls.get(best_sig, [])
-                            if examples:
-                                print(f"DEBUG_FUZZY_MAP our={our_sig_norm} matched_sig={best_sig} examples={examples[:2]}")
-                        except Exception:
-                            pass
+                        # Fuzzy match found but not used (new function, no direct coverage)
+                        pass
                 except Exception:
                     pass
 
