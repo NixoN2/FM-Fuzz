@@ -480,7 +480,7 @@ class PrepareCommitAnalyzer:
         Only consider the qualified function name (before '('), allow std types in parameters.
         """
         try:
-            head = signature.split('(')[0]
+            head = signature.split('(')[0].strip()
             # If the function itself is in std or gnu namespaces, skip
             if head.startswith('std::') or head.startswith('__') or head.startswith('__gnu_cxx::'):
                 return False
@@ -488,12 +488,17 @@ class PrepareCommitAnalyzer:
             if 'z3::' in head:
                 return True
             # Fallback: if it has a namespace and isn't std/gnu, accept
+            # This catches functions like arith_rewriter::mk_mul_div (class methods)
             if '::' in head:
                 ns = head.split('::', 1)[0]
                 if ns and ns != 'std' and not ns.startswith('__') and ns != '__gnu_cxx':
                     return True
+            # Also accept functions without explicit namespace if they're class methods
+            # (e.g., if signature is just "mk_mul_div" but it's in a class context)
+            # But we'll be conservative and require namespace for now
             return False
-        except Exception:
+        except Exception as e:
+            print(f"DEBUG is_z3_function error for '{signature[:60]}': {e}")
             return False
     
     def get_commit_functions(self, commit_hash: str) -> List[str]:
@@ -503,34 +508,54 @@ class PrepareCommitAnalyzer:
         """
         commit_info = self.git.get_commit_info(commit_hash)
         if not commit_info:
+            print("DEBUG: No commit info found")
             return []
 
         # Get diff and changed line ranges on the new side
         diff_text = self.git.get_commit_diff(commit_hash)
         changed_files_lines = self.git.get_changed_lines(diff_text)
+        print(f"DEBUG: Changed files: {list(changed_files_lines.keys())}")
+        for file_path, lines in changed_files_lines.items():
+            print(f"DEBUG:   {file_path}: {len(lines)} changed lines (first 10: {sorted(lines)[:10]})")
 
         # Parent commit (if any)
         try:
             commit = self.repo.commit(commit_hash)
             parent_hash = commit.parents[0].hexsha if commit.parents else None
-        except Exception:
+            print(f"DEBUG: Parent commit: {parent_hash}")
+        except Exception as e:
             parent_hash = None
+            print(f"DEBUG: No parent commit: {e}")
 
         changed_functions: List[str] = []
 
         for file_path, changed_lines in changed_files_lines.items():
             # Only consider project sources under src/
             if not (file_path.startswith('src/') and file_path.endswith(('.cpp', '.cc', '.c', '.h', '.hpp'))):
+                print(f"DEBUG: Skipping {file_path} (not in src/ or not C++ file)")
                 continue
 
+            print(f"DEBUG: Processing {file_path} with {len(changed_lines)} changed lines")
             after_src = self.git.get_file_text_at_commit(commit_hash, file_path)
             if after_src is None:
+                print(f"DEBUG: Could not get file text for {file_path} at commit {commit_hash}")
                 continue
             before_src = self.git.get_file_text_at_commit(parent_hash, file_path) if parent_hash else None
 
             # Parse functions from in-memory contents
+            print(f"DEBUG: Parsing functions from {file_path}...")
             after_funcs = self.parse_functions_from_text(file_path, after_src)
             before_funcs = self.parse_functions_from_text(file_path, before_src) if before_src is not None else []
+            print(f"DEBUG: Found {len(after_funcs)} functions in after, {len(before_funcs)} in before")
+            
+            # Debug: print all function signatures found
+            if after_funcs:
+                print(f"DEBUG: All functions found in {file_path}:")
+                for f in after_funcs[:20]:  # Print first 20
+                    is_z3 = self.is_z3_function(f.signature)
+                    print(f"DEBUG:   {f.signature[:80]}... (is_z3={is_z3}, lines={f.start}-{f.end})")
+                if len(after_funcs) > 20:
+                    print(f"DEBUG:   ... and {len(after_funcs) - 20} more")
 
             # Build indexes for before
             before_by_sig = {self.build_signature_key(f.signature): f for f in before_funcs}
@@ -547,14 +572,23 @@ class PrepareCommitAnalyzer:
             selected: Dict[str, FunctionInfo] = {}
             if after_funcs:
                 z3_funcs = [f for f in after_funcs if self.is_z3_function(f.signature)]
+                print(f"DEBUG: Filtered to {len(z3_funcs)} Z3 functions")
                 for ln in sorted(changed_lines):
                     candidates = [f for f in z3_funcs if int(f.start) <= ln <= int(f.end)]
                     if not candidates:
+                        print(f"DEBUG: Line {ln}: No Z3 function candidates found")
+                        # Debug: show what functions are near this line
+                        nearby = [f for f in after_funcs if abs(int(f.start) - ln) <= 5 or abs(int(f.end) - ln) <= 5]
+                        if nearby:
+                            print(f"DEBUG:   Nearby functions (not Z3): {[f.signature[:60] for f in nearby[:3]]}")
                         continue
                     # choose innermost by minimal extent length, then earliest start
                     chosen = min(candidates, key=lambda f: (int(f.end) - int(f.start), int(f.start)))
                     key = self.build_signature_key(chosen.signature)
                     selected[key] = chosen
+                    print(f"DEBUG: Line {ln}: Selected {chosen.signature[:80]} (lines {chosen.start}-{chosen.end})")
+
+            print(f"DEBUG: Selected {len(selected)} unique functions from changed lines")
 
             # Emit selected functions, dropping pure moves
             for sig_key, f in selected.items():
@@ -564,12 +598,14 @@ class PrepareCommitAnalyzer:
                     bf = before_by_sig[sig_key]
                     if normalized_body(before_src, bf) == normalized_body(after_src, f):
                         is_move = True
+                        print(f"DEBUG: Excluding {f.signature[:60]} as pure move")
                 if is_move:
                     continue
                 mapping_entry = f"{file_path}:{f.signature}"
                 changed_functions.append(mapping_entry)
                 print(f"    Selected: {mapping_entry} (overlap=True, sig_changed=False)")
 
+        print(f"DEBUG: Total changed functions found: {len(changed_functions)}")
         return changed_functions
 
     def parse_functions_from_text(self, file_path: str, source_text: Optional[str]) -> List[FunctionInfo]:
