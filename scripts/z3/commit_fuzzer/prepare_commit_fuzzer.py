@@ -192,25 +192,51 @@ class Matcher:
             our_sig_norm = self._strip_line_suffix(our_sig)
             our_full_norm = f"{our_path}:{our_sig_norm}"
 
+            print(f"DEBUG_MATCH: Function={func}")
+            print(f"DEBUG_MATCH:   our_path={our_path}")
+            print(f"DEBUG_MATCH:   our_sig={our_sig}")
+            print(f"DEBUG_MATCH:   our_sig_norm={our_sig_norm}")
+            print(f"DEBUG_MATCH:   our_full_norm={our_full_norm}")
+
             if our_full_norm in cov_full_to_tests:
                 tests = cov_full_to_tests[our_full_norm]
                 matching_tests.update(tests)
                 direct_matches += 1
                 match_type = "direct"
+                print(f"DEBUG_MATCH:   ✓ DIRECT MATCH (full path+signature)")
             elif our_sig_norm in cov_sig_to_tests:
                 tests = cov_sig_to_tests[our_sig_norm]
                 matching_tests.update(tests)
                 path_removed_matches += 1
                 match_type = "path_removed"
+                print(f"DEBUG_MATCH:   ✓ PATH-REMOVED MATCH (signature only)")
                 # Debug: show example mapping keys for this signature
                 try:
                     examples = cov_sig_to_fulls.get(our_sig_norm, [])
                     if examples:
-                        print(f"DEBUG_PATHLESS our={our_sig_norm} examples={examples}")
+                        print(f"DEBUG_PATHLESS our={our_sig_norm} examples={examples[:3]}")
                 except Exception:
                     pass
             else:
+                print(f"DEBUG_MATCH:   ✗ NO DIRECT MATCH")
+                # Show a few similar signatures for debugging
                 try:
+                    # Find best matches
+                    candidates = []
+                    for cov_sig in cov_sigs_list:
+                        ratio = difflib.SequenceMatcher(None, our_sig_norm, cov_sig).ratio()
+                        if ratio >= 0.8:  # Show anything >= 80% similar
+                            candidates.append((cov_sig, ratio))
+                    candidates.sort(key=lambda x: x[1], reverse=True)
+                    
+                    if candidates:
+                        print(f"DEBUG_MATCH:   Similar signatures (top 5):")
+                        for cov_sig, ratio in candidates[:5]:
+                            examples = cov_sig_to_fulls.get(cov_sig, [])
+                            print(f"DEBUG_MATCH:     ratio={ratio:.3f}: {cov_sig[:100]}")
+                            if examples:
+                                print(f"DEBUG_MATCH:       examples: {examples[:2]}")
+                    
                     best = max(
                         ((cov_sig, difflib.SequenceMatcher(None, our_sig_norm, cov_sig).ratio()) for cov_sig in cov_sigs_list),
                         key=lambda x: x[1],
@@ -220,14 +246,26 @@ class Matcher:
                     if best_sig is not None and best_ratio >= 0.9:
                         # Do NOT count fuzzy matches as coverage; only report candidates
                         match_type = f"fuzzy_candidate:{best_ratio:.2f}"
+                        print(f"DEBUG_MATCH:   Best fuzzy match: ratio={best_ratio:.3f}")
+                        print(f"DEBUG_MATCH:     our:  {our_sig_norm}")
+                        print(f"DEBUG_MATCH:     cov:  {best_sig}")
+                        # Character-by-character diff
+                        diff = list(difflib.unified_diff(
+                            our_sig_norm.split(), 
+                            best_sig.split(), 
+                            lineterm='', 
+                            n=0
+                        ))
+                        if diff:
+                            print(f"DEBUG_MATCH:     diff: {diff[:10]}")
                         try:
                             examples = cov_sig_to_fulls.get(best_sig, [])
                             if examples:
-                                print(f"DEBUG_FUZZY_MAP our={our_sig_norm} matched_sig={best_sig} examples={examples}")
+                                print(f"DEBUG_FUZZY_MAP our={our_sig_norm} matched_sig={best_sig} examples={examples[:2]}")
                         except Exception:
                             pass
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"DEBUG_MATCH:   Error finding matches: {e}")
 
             if matching_tests:
                 all_covering_tests.update(matching_tests)
@@ -651,8 +689,7 @@ class PrepareCommitAnalyzer:
                         cursor_kind = n.kind
                     except ValueError as e:
                         # Unknown cursor kind - skip this node but continue visiting children
-                        if "Unknown" in str(e) and unknown_kinds_count < 5:
-                            print(f"DEBUG parse_functions: Skipping unknown cursor kind: {e}")
+                        # This is a known issue with libclang version mismatches, but we handle it gracefully
                         unknown_kinds_count += 1
                         # Still visit children in case they're valid
                         try:
@@ -686,11 +723,6 @@ class PrepareCommitAnalyzer:
                                             end=n.extent.end.line,
                                             file=node_file
                                         ))
-                                    else:
-                                        print(f"DEBUG parse_functions: File mismatch - nf={nf}, exp={exp}")
-                                elif sig and not is_z3:
-                                    if all_funcs_count <= 5:  # Show first few non-Z3 functions
-                                        print(f"DEBUG parse_functions: Non-Z3 function: {sig[:80]}")
                 except Exception as e:
                     # Handle any other errors during node processing
                     if all_funcs_count < 5:  # Only print first few errors to avoid spam
@@ -890,16 +922,14 @@ class PrepareCommitAnalyzer:
 
 
     def _build_clang_args(self) -> List[str]:
-        """Build unified clang arguments for Z3 parsing."""
+        """Build unified clang arguments for Z3 parsing.
+        Note: We're parsing for AST analysis, not building, so we don't need coverage/debug flags.
+        """
         args = [
             # Force C++ mode for header files
             '-x', 'c++',
-            # Optimization and debug flags (important for coverage)
-            '-O0',                              # No optimization
-            '-g',                               # Debug symbols
-            '--coverage',                       # Coverage instrumentation
-            # C++ standard
-            '-std=gnu++20',                     # C++20 standard (Z3 uses C++20)
+            # C++ standard (Z3 uses C++20, but try c++20 first, fallback to gnu++20 if needed)
+            '-std=c++20',                       # C++20 standard (Z3 uses C++20)
             '-gz=none',                         # Disable debug section compression
             # Include paths (critical for Z3)
             '-I./include',                      # Public headers
@@ -907,29 +937,20 @@ class PrepareCommitAnalyzer:
             '-I./src',                          # Source directory
             '-I./build/src',                    # Build source directory
             
-            # Z3-specific preprocessor definitions
+            # Z3-specific preprocessor definitions (minimal set for parsing)
             '-DZ3DEBUG',                        # Z3 debug mode
             '-D_MP_INTERNAL',                    # Internal multiprecision
-            '-D_TRACE',                         # Enable tracing
             '-D_USE_MATH_DEFINES',
             
-            # Compiler flags used by Z3
+            # Compiler flags for parsing (avoid errors that would stop parsing)
             '-fPIC',                            # Position Independent Code
-            '-fvisibility=hidden',              # Hide symbols
-            '-fvisibility-inlines-hidden',      # Hide inline symbols
-            '-Wall',                            # All warnings
-            '-Werror=odr',                      # ODR violations as errors
-            '-Werror=return-type',              # Missing returns as errors
-            '-Werror=delete-non-virtual-dtor', # Delete non-virtual dtor as errors
-            '-Werror=overloaded-virtual',       # Overloaded virtual as errors
-            '-Werror=non-virtual-dtor',         # Non-virtual dtor as errors
-            '-Werror=null-dereference',        # Null dereference as errors
+            '-Wall',                            # All warnings (but don't error)
+            '-Wno-error',                       # Don't treat warnings as errors
             '-Wsuggest-override',
             '-Wimplicit-fallthrough',
             '-Wshadow',
             '-fno-operator-names',
             '-Wno-deprecated-declarations',
-            '-Wno-error=deprecated-declarations',
             
             # Additional flags for better parsing
             '-fparse-all-comments',
