@@ -637,18 +637,50 @@ class PrepareCommitAnalyzer:
             print(f"DEBUG_PARSE: Using {len(args)} clang args")
             if len(args) < 5:
                 print(f"DEBUG_PARSE: WARNING - Very few clang args: {args[:10]}")
+            # Check if include paths exist
+            include_paths = [arg for arg in args if arg.startswith('-I')]
+            missing_includes = []
+            for inc in include_paths:
+                inc_path = inc[2:] if inc.startswith('-I') else inc
+                if inc_path and not os.path.isabs(inc_path):
+                    # Relative path - check relative to repo_path
+                    check_path = self.repo_path / inc_path
+                    if not check_path.exists():
+                        missing_includes.append(str(check_path))
+                elif inc_path and os.path.isabs(inc_path):
+                    if not os.path.exists(inc_path):
+                        missing_includes.append(inc_path)
+            if missing_includes:
+                print(f"DEBUG_PARSE: Missing include paths (first 5): {missing_includes[:5]}")
+            
             try:
                 tu = index.parse(abs_path, args=args, unsaved_files=[(abs_path, source_text)])
             except clang.cindex.TranslationUnitLoadError as e:
                 print(f"DEBUG_PARSE: TranslationUnitLoadError for {file_path}: {e}")
-                # Try to parse with options that allow incomplete parsing
+                # Try to parse with options that allow incomplete parsing and errors
                 try:
-                    options = clang.cindex.TranslationUnit.PARSE_SKIP_FUNCTION_BODIES | clang.cindex.TranslationUnit.PARSE_INCOMPLETE
+                    options = (clang.cindex.TranslationUnit.PARSE_SKIP_FUNCTION_BODIES | 
+                              clang.cindex.TranslationUnit.PARSE_INCOMPLETE |
+                              clang.cindex.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
                     tu = index.parse(abs_path, args=args, unsaved_files=[(abs_path, source_text)], options=options)
                     print(f"DEBUG_PARSE: Retry with incomplete parsing succeeded")
                 except Exception as e2:
                     print(f"DEBUG_PARSE: Retry also failed: {e2}")
-                    raise
+                    # Try to get diagnostics from the failed parse attempt by checking if TU was partially created
+                    try:
+                        # Try one more time with even more permissive options
+                        options = (clang.cindex.TranslationUnit.PARSE_SKIP_FUNCTION_BODIES | 
+                                  clang.cindex.TranslationUnit.PARSE_INCOMPLETE |
+                                  clang.cindex.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD |
+                                  clang.cindex.TranslationUnit.PARSE_PRECOMPILED_PREAMBLE)
+                        tu = index.parse(abs_path, args=args, unsaved_files=[(abs_path, source_text)], options=options)
+                        print(f"DEBUG_PARSE: Retry with preamble parsing succeeded")
+                    except Exception as e3:
+                        print(f"DEBUG_PARSE: All retry attempts failed. Last error: {e3}")
+                        # Print sample of args to help debug
+                        print(f"DEBUG_PARSE: Sample args (first 15): {args[:15]}")
+                        print(f"DEBUG_PARSE: Sample args (last 10): {args[-10:]}")
+                        raise
             try:
                 if tu.diagnostics:
                     print(f"DEBUG_CLANG_TU_DIAG_COUNT: {len(tu.diagnostics)}")
