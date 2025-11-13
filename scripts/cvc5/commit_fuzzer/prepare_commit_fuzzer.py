@@ -274,12 +274,24 @@ class PrepareCommitAnalyzer:
         try:
             cc_path = Path(compile_commands)
             cc_dir = cc_path if cc_path.is_dir() else cc_path.parent
+            cc_file = cc_dir / "compile_commands.json" if cc_path.is_dir() else cc_path
+            print(f"DEBUG_COMPDB: Initializing compilation database from {cc_file}")
+            if not cc_file.exists():
+                print(f"DEBUG_COMPDB: compile_commands.json not found at {cc_file}")
+                self.compdb = None
+                self.compdb_dir = None
+                return
+            print(f"DEBUG_COMPDB: compile_commands.json exists, loading...")
             db = clang.cindex.CompilationDatabase.fromDirectory(str(cc_dir))  # type: ignore
             # Probe database (may raise if not usable)
-            _ = db.getAllCompileCommands()  # type: ignore[attr-defined]
+            all_cmds = db.getAllCompileCommands()  # type: ignore[attr-defined]
+            print(f"DEBUG_COMPDB: Loaded compilation database with {len(all_cmds)} commands")
             self.compdb = db
             self.compdb_dir = str(cc_dir)
-        except Exception:
+        except Exception as e:
+            print(f"DEBUG_COMPDB: Exception initializing compilation database: {e}")
+            import traceback
+            traceback.print_exc()
             self.compdb = None
             self.compdb_dir = None
 
@@ -318,8 +330,10 @@ class PrepareCommitAnalyzer:
         if self.compdb:
             try:
                 abs_path = str((self.repo_path / file_path).resolve()) if not os.path.isabs(file_path) else file_path
+                print(f"DEBUG_CLANG_ARGS: Trying compile_commands for {file_path} (abs_path: {abs_path})")
                 cmds = self.compdb.getCompileCommands(abs_path)  # type: ignore
                 if cmds and len(cmds) > 0:
+                    print(f"DEBUG_CLANG_ARGS: Found {len(cmds)} compile commands")
                     # Pick first entry
                     cc = cmds[0]
                     args = self._extract_args_from_compile_command(cc)
@@ -327,11 +341,20 @@ class PrepareCommitAnalyzer:
                     crd = self._clang_resource_dir()
                     if crd and '-resource-dir' not in args:
                         args.extend(['-resource-dir', crd])
+                    print(f"DEBUG_CLANG_ARGS: Using compile_commands args (first 10): {args[:10]}")
                     return args
-            except Exception:
+                else:
+                    print(f"DEBUG_CLANG_ARGS: No compile commands found for {file_path}")
+            except Exception as e:
+                print(f"DEBUG_CLANG_ARGS: Exception getting compile commands: {e}")
                 pass
+        else:
+            print(f"DEBUG_CLANG_ARGS: No compilation database available (compdb is None)")
         # Fallback
-        return self._build_clang_args()
+        print(f"DEBUG_CLANG_ARGS: Using fallback _build_clang_args()")
+        args = self._build_clang_args()
+        print(f"DEBUG_CLANG_ARGS: Fallback args (first 10): {args[:10]}")
+        return args
 
     def _demangle_with_cxxfilt(self, mangled: Optional[str]) -> Optional[str]:
         """Demangle a mangled C++ symbol using c++filt (binutils)."""
@@ -612,7 +635,20 @@ class PrepareCommitAnalyzer:
             abs_path = str((self.repo_path / file_path).resolve()) if not os.path.isabs(file_path) else file_path
             print(f"DEBUG_PARSE: Parsing {file_path} (abs_path: {abs_path})")
             print(f"DEBUG_PARSE: Using {len(args)} clang args")
-            tu = index.parse(abs_path, args=args, unsaved_files=[(abs_path, source_text)])
+            if len(args) < 5:
+                print(f"DEBUG_PARSE: WARNING - Very few clang args: {args[:10]}")
+            try:
+                tu = index.parse(abs_path, args=args, unsaved_files=[(abs_path, source_text)])
+            except clang.cindex.TranslationUnitLoadError as e:
+                print(f"DEBUG_PARSE: TranslationUnitLoadError for {file_path}: {e}")
+                # Try to parse with options that allow incomplete parsing
+                try:
+                    options = clang.cindex.TranslationUnit.PARSE_SKIP_FUNCTION_BODIES | clang.cindex.TranslationUnit.PARSE_INCOMPLETE
+                    tu = index.parse(abs_path, args=args, unsaved_files=[(abs_path, source_text)], options=options)
+                    print(f"DEBUG_PARSE: Retry with incomplete parsing succeeded")
+                except Exception as e2:
+                    print(f"DEBUG_PARSE: Retry also failed: {e2}")
+                    raise
             try:
                 if tu.diagnostics:
                     print(f"DEBUG_CLANG_TU_DIAG_COUNT: {len(tu.diagnostics)}")
