@@ -63,7 +63,14 @@ jobs:
         run: |
           echo "🔨 Manual run triggered"
           echo "fuzzing_needed=true" >> $GITHUB_OUTPUT
-          echo "sha=${{ inputs.cvc5_commit_hash }}" >> $GITHUB_OUTPUT
+          # Use input if provided, otherwise will be set later from git HEAD
+          if [ -n "${{ inputs.cvc5_commit_hash }}" ]; then
+            echo "sha=${{ inputs.cvc5_commit_hash }}" >> $GITHUB_OUTPUT
+            echo "Provided commit hash: ${{ inputs.cvc5_commit_hash }}"
+          else
+            echo "sha=" >> $GITHUB_OUTPUT
+            echo "No commit hash provided, will use HEAD"
+          fi
           echo "is_manual_run=true" >> $GITHUB_OUTPUT
       
       - name: Set combined outputs
@@ -78,9 +85,15 @@ jobs:
           else
             FUZZING_NEEDED="${{ steps.set-outputs-manual.outputs.fuzzing_needed }}"
             SHA="${{ steps.set-outputs-manual.outputs.sha }}"
+            # For manual runs, prefer input if provided, otherwise use output from manual step
+            if [ -n "${{ inputs.cvc5_commit_hash }}" ]; then
+              SHA="${{ inputs.cvc5_commit_hash }}"
+              echo "Using provided commit hash from input: ${SHA}"
+            fi
             echo "fuzzing_needed=${FUZZING_NEEDED:-true}" >> $GITHUB_OUTPUT
             echo "sha=${SHA:-}" >> $GITHUB_OUTPUT
             echo "is_manual_run=true" >> $GITHUB_OUTPUT
+            echo "Final sha output: ${SHA:-}"
           fi
       
       - name: Configure AWS credentials
