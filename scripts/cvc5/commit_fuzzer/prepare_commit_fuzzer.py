@@ -506,36 +506,48 @@ class PrepareCommitAnalyzer:
         Includes functions whose body overlaps changed lines or whose signature changed.
         Excludes pure moves (identical normalized body before/after).
         """
+        print(f"DEBUG: get_commit_functions called for commit {commit_hash}")
         commit_info = self.git.get_commit_info(commit_hash)
         if not commit_info:
+            print(f"DEBUG: Failed to get commit info for {commit_hash}")
             return []
 
         # Get diff and changed line ranges on the new side
         diff_text = self.git.get_commit_diff(commit_hash)
         changed_files_lines = self.git.get_changed_lines(diff_text)
+        print(f"DEBUG: Found {len(changed_files_lines)} files with changes")
 
         # Parent commit (if any)
         try:
             commit = self.repo.commit(commit_hash)
             parent_hash = commit.parents[0].hexsha if commit.parents else None
-        except Exception:
+            print(f"DEBUG: Parent commit: {parent_hash}")
+        except Exception as e:
+            print(f"DEBUG: Exception getting parent commit: {e}")
             parent_hash = None
 
         changed_functions: List[str] = []
 
         for file_path, changed_lines in changed_files_lines.items():
+            print(f"DEBUG: Processing file {file_path} with {len(changed_lines)} changed lines: {sorted(changed_lines)[:10]}...")
             # Only consider project sources under src/
             if not (file_path.startswith('src/') and file_path.endswith(('.cpp', '.cc', '.c', '.h', '.hpp'))):
+                print(f"DEBUG: Skipping {file_path} (not in src/ or not C++ file)")
                 continue
 
             after_src = self.git.get_file_text_at_commit(commit_hash, file_path)
             if after_src is None:
+                print(f"DEBUG: Could not get file text for {file_path} at commit {commit_hash}")
                 continue
+            print(f"DEBUG: Got file text for {file_path}, length: {len(after_src)} chars")
             before_src = self.git.get_file_text_at_commit(parent_hash, file_path) if parent_hash else None
 
             # Parse functions from in-memory contents
+            print(f"DEBUG: Parsing functions from {file_path}...")
             after_funcs = self.parse_functions_from_text(file_path, after_src)
+            print(f"DEBUG: Parsed {len(after_funcs)} functions from {file_path}")
             before_funcs = self.parse_functions_from_text(file_path, before_src) if before_src is not None else []
+            print(f"DEBUG: Parsed {len(before_funcs)} functions from before version")
 
             # Build indexes for before
             before_by_sig = {self.build_signature_key(f.signature): f for f in before_funcs}
@@ -552,14 +564,23 @@ class PrepareCommitAnalyzer:
             selected: Dict[str, FunctionInfo] = {}
             if after_funcs:
                 cvc5_funcs = [f for f in after_funcs if self.is_cvc5_function(f.signature)]
+                print(f"DEBUG: Filtered to {len(cvc5_funcs)} cvc5 functions (from {len(after_funcs)} total)")
+                if len(cvc5_funcs) == 0 and len(after_funcs) > 0:
+                    print(f"DEBUG: Sample non-cvc5 function signatures:")
+                    for f in after_funcs[:5]:
+                        print(f"DEBUG:   - {f.signature}")
                 for ln in sorted(changed_lines):
                     candidates = [f for f in cvc5_funcs if int(f.start) <= ln <= int(f.end)]
                     if not candidates:
+                        print(f"DEBUG: No candidates for changed line {ln}")
                         continue
                     # choose innermost by minimal extent length, then earliest start
                     chosen = min(candidates, key=lambda f: (int(f.end) - int(f.start), int(f.start)))
                     key = self.build_signature_key(chosen.signature)
                     selected[key] = chosen
+                    print(f"DEBUG: Selected function for line {ln}: {chosen.signature} (lines {chosen.start}-{chosen.end})")
+            else:
+                print(f"DEBUG: No functions parsed from {file_path}")
 
             # Emit selected functions, dropping pure moves
             for sig_key, f in selected.items():
@@ -569,23 +590,28 @@ class PrepareCommitAnalyzer:
                     bf = before_by_sig[sig_key]
                     if normalized_body(before_src, bf) == normalized_body(after_src, f):
                         is_move = True
+                        print(f"DEBUG: Skipping {sig_key} (pure move)")
                 if is_move:
                     continue
                 mapping_entry = f"{file_path}:{f.signature}"
                 changed_functions.append(mapping_entry)
                 print(f"    Selected: {mapping_entry} (overlap=True, sig_changed=False)")
 
+        print(f"DEBUG: Total changed functions found: {len(changed_functions)}")
         return changed_functions
 
     def parse_functions_from_text(self, file_path: str, source_text: Optional[str]) -> List[FunctionInfo]:
         """Parse C++ function definitions from provided source text using libclang unsaved_files."""
         if source_text is None:
+            print(f"DEBUG_PARSE: source_text is None for {file_path}")
             return []
         
         try:
             index = clang.cindex.Index.create()
             args = self._get_clang_args_for_file(file_path)
             abs_path = str((self.repo_path / file_path).resolve()) if not os.path.isabs(file_path) else file_path
+            print(f"DEBUG_PARSE: Parsing {file_path} (abs_path: {abs_path})")
+            print(f"DEBUG_PARSE: Using {len(args)} clang args")
             tu = index.parse(abs_path, args=args, unsaved_files=[(abs_path, source_text)])
             try:
                 if tu.diagnostics:
@@ -596,27 +622,54 @@ class PrepareCommitAnalyzer:
                 pass
 
             funcs: List[FunctionInfo] = []
+            all_funcs_count = 0
+            cvc5_funcs_count = 0
+            file_match_failures = 0
 
             def visit(n):
-                if n.kind in [clang.cindex.CursorKind.FUNCTION_DECL, clang.cindex.CursorKind.CXX_METHOD] and n.is_definition():
-                    sig = self.get_function_signature(n)
-                    node_file = str(n.location.file) if n.location and n.location.file else None
-                    if sig and node_file and self.is_cvc5_function(sig):
-                        nf = normpath(node_file)
-                        exp = normpath(abs_path)
-                        if nf.endswith(exp):
-                            funcs.append(FunctionInfo(
-                                signature=sig,
-                                start=n.extent.start.line,
-                                end=n.extent.end.line,
-                                file=node_file
-                            ))
-                for c in n.get_children():
-                    visit(c)
+                nonlocal all_funcs_count, cvc5_funcs_count, file_match_failures
+                try:
+                    if n.kind in [clang.cindex.CursorKind.FUNCTION_DECL, clang.cindex.CursorKind.CXX_METHOD] and n.is_definition():
+                        all_funcs_count += 1
+                        sig = self.get_function_signature(n)
+                        node_file = str(n.location.file) if n.location and n.location.file else None
+                        if sig:
+                            is_cvc5 = self.is_cvc5_function(sig)
+                            if is_cvc5:
+                                cvc5_funcs_count += 1
+                            if sig and node_file:
+                                nf = normpath(node_file)
+                                exp = normpath(abs_path)
+                                if nf.endswith(exp):
+                                    if is_cvc5:
+                                        funcs.append(FunctionInfo(
+                                            signature=sig,
+                                            start=n.extent.start.line,
+                                            end=n.extent.end.line,
+                                            file=node_file
+                                        ))
+                                    else:
+                                        if all_funcs_count <= 3:  # Only print first few for debugging
+                                            print(f"DEBUG_PARSE: Skipping non-cvc5 function: {sig}")
+                                else:
+                                    file_match_failures += 1
+                                    if file_match_failures <= 3:  # Only print first few
+                                        print(f"DEBUG_PARSE: File path mismatch: nf={nf}, exp={exp}")
+                except Exception as e:
+                    print(f"DEBUG_PARSE: Exception in visit: {e}")
+                try:
+                    for c in n.get_children():
+                        visit(c)
+                except Exception as e:
+                    print(f"DEBUG_PARSE: Exception visiting children: {e}")
 
             visit(tu.cursor)
+            print(f"DEBUG_PARSE: Found {all_funcs_count} total functions, {cvc5_funcs_count} cvc5 functions, {len(funcs)} added (file_match_failures: {file_match_failures})")
             return funcs
-        except Exception:
+        except Exception as e:
+            print(f"DEBUG_PARSE: Exception parsing {file_path}: {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
     def build_signature_key(self, signature: str) -> str:
