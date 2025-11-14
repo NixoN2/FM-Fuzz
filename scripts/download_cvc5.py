@@ -26,15 +26,22 @@ def install_unzip():
         print("❌ Cannot install unzip automatically. Please install unzip manually.")
         sys.exit(1)
 
-def get_latest_release():
+def get_latest_release(github_token=None):
     """Get the latest release from GitHub API"""
     url = "https://api.github.com/repos/cvc5/cvc5/releases/latest"
+    headers = {
+        'User-Agent': 'FM-Fuzz/1.0'  # GitHub API requires User-Agent header
+    }
+    if github_token:
+        headers['Authorization'] = f'token {github_token}'
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         return response.json()
     except requests.RequestException as e:
         print(f"❌ Failed to get latest release: {e}")
+        if hasattr(e, 'response') and e.response is not None and e.response.status_code == 403:
+            print("⚠️ 403 Forbidden - This might be a rate limit issue. Consider setting GITHUB_TOKEN environment variable.")
         sys.exit(1)
 
 def find_linux_binary(assets):
@@ -45,7 +52,7 @@ def find_linux_binary(assets):
             return url
     return None
 
-def download_and_extract(asset_url, output_dir):
+def download_and_extract(asset_url, output_dir, github_token=None):
     """Download and extract the CVC5 binary"""
     print(f"📥 Downloading: {asset_url}")
     
@@ -53,14 +60,21 @@ def download_and_extract(asset_url, output_dir):
         zip_path = os.path.join(temp_dir, "cvc5.zip")
         
         # Download
+        headers = {
+            'User-Agent': 'FM-Fuzz/1.0'  # GitHub API requires User-Agent header
+        }
+        if github_token:
+            headers['Authorization'] = f'token {github_token}'
         try:
-            response = requests.get(asset_url, timeout=60, stream=True)
+            response = requests.get(asset_url, headers=headers, timeout=60, stream=True)
             response.raise_for_status()
             with open(zip_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
         except requests.RequestException as e:
             print(f"❌ Failed to download: {e}")
+            if hasattr(e, 'response') and e.response is not None and e.response.status_code == 403:
+                print("⚠️ 403 Forbidden - This might be a rate limit issue. Consider setting GITHUB_TOKEN environment variable.")
             sys.exit(1)
         
         # Extract
@@ -93,8 +107,11 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
+    # Get GitHub token from environment variable (set by GitHub Actions)
+    github_token = os.environ.get('GITHUB_TOKEN')
+    
     print("🔍 Finding latest CVC5 release...")
-    release = get_latest_release()
+    release = get_latest_release(github_token)
     tag = release['tag_name']
     print(f"📦 Latest release: {tag}")
     
@@ -103,7 +120,7 @@ def main():
         print(f"❌ Linux x86_64 static binary not found in {tag}")
         sys.exit(1)
     
-    binary_path = download_and_extract(binary_url, str(output_dir))
+    binary_path = download_and_extract(binary_url, str(output_dir), github_token)
     
     # Verify
     result = subprocess.run([binary_path, '--version'], capture_output=True, text=True, check=False)

@@ -461,6 +461,8 @@ jobs:
           pip install -e .
 
       - name: Install CVC5 oracle
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 scripts/download_cvc5.py $HOME/.local/bin
           echo "$HOME/.local/bin" >> $GITHUB_PATH

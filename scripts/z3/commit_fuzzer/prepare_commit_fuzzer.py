@@ -489,14 +489,19 @@ class PrepareCommitAnalyzer:
         except Exception:
             return False
     
-    def get_commit_functions(self, commit_hash: str) -> List[str]:
+    def get_commit_functions(self, commit_hash: str) -> tuple[List[str], List[str]]:
         """Get changed C++ functions by intersecting diff ranges with AST extents.
         Includes functions whose body overlaps changed lines or whose signature changed.
         Excludes pure moves (identical normalized body before/after).
+        
+        Returns:
+            (changed_functions, files_with_no_functions) where:
+            - changed_functions: List of function signatures found
+            - files_with_no_functions: List of .cpp/.hpp file paths that were changed but had no functions detected
         """
         commit_info = self.git.get_commit_info(commit_hash)
         if not commit_info:
-            return []
+            return ([], [])
 
         # Get diff and changed line ranges on the new side
         diff_text = self.git.get_commit_diff(commit_hash)
@@ -510,9 +515,10 @@ class PrepareCommitAnalyzer:
             parent_hash = None
 
         changed_functions: List[str] = []
+        files_with_no_functions: List[str] = []
 
         for file_path, changed_lines in changed_files_lines.items():
-            # Only consider project sources under src/
+            # Only consider project sources under src/ and C++ files
             if not (file_path.startswith('src/') and file_path.endswith(('.cpp', '.cc', '.c', '.h', '.hpp'))):
                 continue
 
@@ -549,6 +555,10 @@ class PrepareCommitAnalyzer:
                     key = self.build_signature_key(chosen.signature)
                     selected[key] = chosen
 
+            # Check if this is a .cpp or .hpp file with no functions detected
+            if file_path.endswith(('.cpp', '.hpp')) and len(selected) == 0:
+                files_with_no_functions.append(file_path)
+
             # Emit selected functions, dropping pure moves
             for sig_key, f in selected.items():
                 # Exclude pure move if existed before and bodies equal
@@ -563,7 +573,7 @@ class PrepareCommitAnalyzer:
                 changed_functions.append(mapping_entry)
                 print(f"    Selected: {mapping_entry} (overlap=True, sig_changed=False)")
 
-        return changed_functions
+        return (changed_functions, files_with_no_functions)
 
     def parse_functions_from_text(self, file_path: str, source_text: Optional[str]) -> List[FunctionInfo]:
         """Parse C++ function definitions from provided source text using libclang unsaved_files."""
@@ -799,6 +809,18 @@ class PrepareCommitAnalyzer:
             }
         matcher = Matcher(self.coverage_map)
         return matcher.match(functions)
+    
+    def get_all_tests_from_coverage(self) -> Set[str]:
+        """Get all unique tests from the coverage mapping."""
+        if not self.coverage_map:
+            return set()
+        all_tests = set()
+        for tests in self.coverage_map.values():
+            if isinstance(tests, (list, set)):
+                all_tests.update(tests)
+            elif isinstance(tests, str):
+                all_tests.add(tests)
+        return all_tests
 
 
     def _get_comprehensive_system_includes(self) -> List[str]:
@@ -870,37 +892,96 @@ class PrepareCommitAnalyzer:
         print(f"Analyzing commit {commit_hash}...")
         
         # Step 1: Get changed functions from commit
-        changed_functions = self.get_commit_functions(commit_hash)
+        changed_functions, files_with_no_functions = self.get_commit_functions(commit_hash)
+        
+        # Step 2: Load coverage mapping
+        self.load_coverage_mapping(coverage_json_path)
         
         if not changed_functions:
-            print("No functions found in commit")
+            # No functions found - check if we should fallback to all tests
+            if files_with_no_functions:
+                print(f"Warning: {len(files_with_no_functions)} .cpp/.hpp file(s) changed but no functions detected:")
+                for f in files_with_no_functions:
+                    print(f"  - {f}")
+                print("Including all tests from coverage mapping as fallback.")
+                all_tests = self.get_all_tests_from_coverage()
+                self.cleanup_coverage_mapping()
+                return {
+                    'commit': commit_hash,
+                    'changed_functions': [],
+                    'files_with_no_functions': files_with_no_functions,
+                    'covering_tests': sorted(list(all_tests)),
+                    'function_matches': {},
+                    'match_type_counts': {},
+                    'summary': {
+                        'total_functions': 0,
+                        'functions_with_tests': 0,
+                        'functions_without_tests': 0,
+                        'total_covering_tests': len(all_tests),
+                        'coverage_percentage': 0,
+                        'fallback_to_all_tests': True
+                    }
+                }
+            else:
+                print("No functions found in commit")
+                self.cleanup_coverage_mapping()
+                return {
+                    'commit': commit_hash,
+                    'changed_functions': [],
+                    'covering_tests': [],
+                    'function_matches': {},
+                    'match_type_counts': {},
+                    'summary': {
+                        'total_functions': 0,
+                        'functions_with_tests': 0,
+                        'functions_without_tests': 0,
+                        'total_covering_tests': 0,
+                        'coverage_percentage': 0,
+                        'fallback_to_all_tests': False
+                    }
+                }
+        
+        # Step 3: Find tests for the changed functions
+        test_results = self.find_tests_for_functions(changed_functions)
+        
+        # Step 4: Check if we have 0 direct matches and files with no functions detected
+        # If so, fallback to all tests
+        if test_results['direct_matches'] == 0 and files_with_no_functions:
+            print(f"Warning: {len(files_with_no_functions)} .cpp/.hpp file(s) changed but no functions detected:")
+            for f in files_with_no_functions:
+                print(f"  - {f}")
+            print(f"No direct matches found ({test_results['direct_matches']} direct matches).")
+            print("Including all tests from coverage mapping as fallback.")
+            all_tests = self.get_all_tests_from_coverage()
+            self.cleanup_coverage_mapping()
             return {
                 'commit': commit_hash,
-                'changed_functions': [],
-                'covering_tests': [],
+                'changed_functions': changed_functions,
+                'files_with_no_functions': files_with_no_functions,
+                'covering_tests': sorted(list(all_tests)),
+                'function_matches': test_results.get('function_matches', {}),
+                'match_type_counts': test_results.get('match_type_counts', {}),
                 'summary': {
-                    'total_functions': 0,
-                    'functions_with_tests': 0,
-                    'functions_without_tests': 0,
-                    'total_covering_tests': 0,
-                    'coverage_percentage': 0
+                    'total_functions': len(changed_functions),
+                    'functions_with_tests': test_results['functions_with_tests'],
+                    'functions_without_tests': test_results['functions_without_tests'],
+                    'total_covering_tests': len(all_tests),
+                    'coverage_percentage': (test_results['functions_with_tests'] / len(changed_functions) * 100) if changed_functions else 0,
+                    'fallback_to_all_tests': True
                 }
             }
         
-        # Step 2: Load coverage mapping and find tests
-        self.load_coverage_mapping(coverage_json_path)
-        test_results = self.find_tests_for_functions(changed_functions)
-        
-        # Step 3: Clean up memory
+        # Step 5: Clean up memory
         self.cleanup_coverage_mapping()
         
-        # Step 4: Generate detailed statistics
+        # Step 6: Generate detailed statistics
         summary = {
             'total_functions': len(changed_functions),
             'functions_with_tests': test_results['functions_with_tests'],
             'functions_without_tests': test_results['functions_without_tests'],
             'total_covering_tests': test_results['total_tests'],
-            'coverage_percentage': (test_results['functions_with_tests'] / len(changed_functions) * 100) if changed_functions else 0
+            'coverage_percentage': (test_results['functions_with_tests'] / len(changed_functions) * 100) if changed_functions else 0,
+            'fallback_to_all_tests': False
         }
         
         print(

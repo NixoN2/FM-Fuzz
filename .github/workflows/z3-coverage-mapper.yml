@@ -68,6 +68,8 @@ jobs:
           fi
       
       - name: Install CVC5 oracle
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           pip install requests
           python3 scripts/download_cvc5.py $HOME/.local/bin
